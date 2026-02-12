@@ -2,6 +2,10 @@
 
 > 🚀 一款集下载、更新、远程配置于一体的 DOF（Dungeon of Fantasy）游戏启动器。需搭配 [DOF 后台系统](https://github.com/onlyGuo/dnf-server-public)共同使用。
 
+## 推广
+一个好玩的大模型聚合平台: [https://gpt.0101.run](https://gpt.0101.run)
+便宜且稳定的大模型API分发平台 [https://0101.run](https://0101.run)
+
 ## ✨ 特性总览
 - **自动检测并下载完整客户端**：空目录运行即可获取全量包（NPK、PVF 等）。
 - **智能增量更新**：已存在客户端时，仅获取后台配置的增量资源。
