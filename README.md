@@ -1,47 +1,65 @@
-﻿# DOF 下载更新一体化登陆器
+﻿# DOF 下载更新器（无登录版）
 
-> 🚀 一款集下载、更新、远程配置于一体的 DOF（Dungeon of Fantasy）游戏启动器。需搭配 [DOF 后台系统](https://github.com/onlyGuo/dnf-server-public)共同使用。
+该版本仅保留 **下载 + 更新 + 启动游戏** 功能，已移除登录/注册流程。
 
-## 推广
-一个好玩的大模型聚合平台: [https://gpt.0101.run](https://gpt.0101.run)
-便宜且稳定的大模型API分发平台 [https://0101.run](https://0101.run)
+## 功能
+- 首次运行自动检查基础资源（如 `Script.pvf`），缺失时下载完整包。
+- 启动时从 **云端直连链接** 拉取 `update-manifest.json`，按清单执行更新。
+- 下载器改为 `aria2c`，支持断点续传/高性能下载。
+- 更新完成（或无更新）后自动启动指定 EXE。
 
-## ✨ 特性总览
-- **自动检测并下载完整客户端**：空目录运行即可获取全量包（NPK、PVF 等）。
-- **智能增量更新**：已存在客户端时，仅获取后台配置的增量资源。
-- **后台可定制 UI**：背景、标题、语言等一键下发。
-- **远程配置同步**：多项游戏参数支持在线调整。
+## 配置文件
+程序目录下会自动生成以下文件：
 
-![update_finish](doc/update_finish.png)
-![login](doc/login.png)
+### 1) `launcher-config.json`
+```json
+{
+  "aria2Path": "aria2c",
+  "gameExePath": "DNF.exe",
+  "baseResourceCheckFile": "Script.pvf",
+  "manifestUrl": "https://example.com/update-manifest.json"
+}
+```
 
-## 📥 自动下载
-首次运行若目录为空，启动器会自动调用后台提供的全量包下载地址，并解压到当前目录，快速构建可用的游戏环境。
+- `aria2Path`: aria2 可执行文件路径（可填绝对路径）。
+- `gameExePath`: 更新完成后启动的 EXE（相对/绝对路径都可）。
+- `baseResourceCheckFile`: 用于判断是否需要完整包的本地文件。
+- `manifestUrl`: 云端 `update-manifest.json` 的直连地址（HTTP/HTTPS）。
 
-![update1](doc/update1.png)
-![update2](doc/update2.png)
+### 2) 云端 `update-manifest.json`
+> 该文件需要放在你的服务器/CDN/对象存储中，通过 `manifestUrl` 访问。
 
-## 🔄 自动更新
-检测到已有游戏文件时，会对比当前版本与后台最新版本，按需下载增量补丁，节省时间与带宽。
+```json
+{
+  "fullPackage": {
+    "version": "1.0.0",
+    "downloadUrl": "https://example.com/full-package.zip",
+    "description": "首次安装完整包"
+  },
+  "incrementalUpdates": [
+    {
+      "version": "1.0.1",
+      "downloadUrl": "https://example.com/patch-1.0.1.zip",
+      "description": "示例补丁"
+    }
+  ]
+}
+```
 
-## 🎨 后台可配置外观
-启动器会在启动时请求样式配置，支持：
-- 背景图片
-- 标题及多语言文案
+- `fullPackage`: 基础资源缺失时下载。
+- `incrementalUpdates`: 按版本号从小到大执行更新。
 
-![login](doc/login-conf.png)
+### 3) `launcher-state.json`
+```json
+{
+  "currentVersion": "1.0.0"
+}
+```
 
-## ⚙️ 远程配置下发
-![client-config](doc/client-conf.png)
+记录当前本地版本，更新成功后自动写入。
 
-可下发的客户端配置包括但不限于：
-- 服务器地址（IP）
-- 角色等级上限
-- 一键卖出/分解品质
-- 无损画质档位、SSS 评分
-- 本地 GM、史诗装备确认、英雄级开关
-- 物品图标补丁、第二名称开关、自定义品级文本
-- 简体 PVF 适配、前置快捷键、连发按钮
-- 自动拾取、副本难度命名、自动翻拍、史诗闪光等
-
-> 📎 更多配置项可通过后台面板扩展，满足不同版本的定制需求。
+## 使用说明
+1. 安装并确保 `aria2c` 可执行（或在 `launcher-config.json` 填绝对路径）。
+2. 将 `update-manifest.json` 上传到云端，拿到直连 URL。
+3. 在 `launcher-config.json` 设置 `manifestUrl` 为该 URL。
+4. 启动程序，程序会自动下载/更新并最终启动 `gameExePath`。
