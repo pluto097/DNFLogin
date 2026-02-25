@@ -2,15 +2,17 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace DNFLogin;
 
 internal sealed class LauncherConfig
 {
     private const string ConfigFileName = "launcher-config.json";
-    private const string ManifestFileName = "update-manifest.json";
     private const string StateFileName = "launcher-state.json";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -22,6 +24,7 @@ internal sealed class LauncherConfig
     public required string Aria2Path { get; init; }
     public required string GameExePath { get; init; }
     public required string BaseResourceCheckFile { get; init; }
+    public required string UpdateManifestUrl { get; init; }
 
     public static LauncherConfig LoadOrCreate(string baseDirectory)
     {
@@ -32,7 +35,8 @@ internal sealed class LauncherConfig
             {
                 Aria2Path = "aria2c",
                 GameExePath = "DNF.exe",
-                BaseResourceCheckFile = "Script.pvf"
+                BaseResourceCheckFile = "Script.pvf",
+                UpdateManifestUrl = "https://example.com/update-manifest.json"
             };
 
             File.WriteAllText(configPath, JsonSerializer.Serialize(defaultConfig, JsonOptions));
@@ -43,43 +47,28 @@ internal sealed class LauncherConfig
         var config = JsonSerializer.Deserialize<LauncherConfig>(content, JsonOptions)
             ?? throw new InvalidOperationException("无法解析 launcher-config.json");
 
-        if (string.IsNullOrWhiteSpace(config.Aria2Path) || string.IsNullOrWhiteSpace(config.GameExePath))
+        if (string.IsNullOrWhiteSpace(config.Aria2Path)
+            || string.IsNullOrWhiteSpace(config.GameExePath)
+            || string.IsNullOrWhiteSpace(config.UpdateManifestUrl))
         {
-            throw new InvalidOperationException("launcher-config.json 缺少必要字段: aria2Path 或 gameExePath");
+            throw new InvalidOperationException("launcher-config.json 缺少必要字段: aria2Path、gameExePath 或 updateManifestUrl");
         }
 
         return config;
     }
 
-    public static UpdateManifest LoadOrCreateManifest(string baseDirectory)
+    public static async Task<UpdateManifest> LoadManifestFromRemoteAsync(LauncherConfig config, CancellationToken cancellationToken = default)
     {
-        var path = Path.Combine(baseDirectory, ManifestFileName);
-        if (!File.Exists(path))
+        if (!Uri.TryCreate(config.UpdateManifestUrl, UriKind.Absolute, out var manifestUri))
         {
-            var defaultManifest = new UpdateManifest
-            {
-                FullPackage = new UpdatePackage
-                {
-                    Version = "1.0.0",
-                    DownloadUrl = "https://example.com/full-package.zip",
-                    Description = "首次安装完整包"
-                },
-                IncrementalUpdates =
-                [
-                    new UpdatePackage
-                    {
-                        Version = "1.0.1",
-                        DownloadUrl = "https://example.com/patch-1.0.1.zip",
-                        Description = "示例补丁"
-                    }
-                ]
-            };
-
-            File.WriteAllText(path, JsonSerializer.Serialize(defaultManifest, JsonOptions));
-            return defaultManifest;
+            throw new InvalidOperationException("launcher-config.json 中 updateManifestUrl 不是有效的绝对地址");
         }
 
-        var content = File.ReadAllText(path);
+        using var client = new HttpClient();
+        using var response = await client.GetAsync(manifestUri, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
         var manifest = JsonSerializer.Deserialize<UpdateManifest>(content, JsonOptions)
             ?? throw new InvalidOperationException("无法解析 update-manifest.json");
 

@@ -119,9 +119,9 @@ namespace DNFLogin
 
             try
             {
-                ReportProgress("正在初始化", "读取本地配置文件", 5, 5);
+                ReportProgress("正在初始化", "读取本地配置并请求云端更新配置", 5, 5);
                 var config = LauncherConfig.LoadOrCreate(_baseDirectory);
-                var manifest = LauncherConfig.LoadOrCreateManifest(_baseDirectory);
+                var manifest = await LauncherConfig.LoadManifestFromRemoteAsync(config).ConfigureAwait(false);
                 var state = LauncherConfig.LoadOrCreateState(_baseDirectory);
 
                 const double baseSpan = 40d;
