@@ -74,6 +74,11 @@ internal sealed class LauncherConfig
             File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
         }
 
+        if (shouldSaveMigratedConfig)
+        {
+            File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
+        }
+
         return config;
     }
 
