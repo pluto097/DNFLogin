@@ -47,6 +47,56 @@
 - `fullPackage`: 基础资源缺失时下载。
 - `incrementalUpdates`: 按版本号从小到大执行更新。
 
+
+#### 写法示范 A：当前还没有 `1.0.1`（无增量补丁）
+```json
+{
+  "fullPackage": {
+    "version": "1.0.0",
+    "downloadUrl": "https://cdn.example.com/full-1.0.0.zip",
+    "description": "首次安装完整包"
+  },
+  "incrementalUpdates": []
+}
+```
+
+> 说明：
+> - 只有完整包，没有任何补丁时，`incrementalUpdates` 直接写空数组即可。
+> - 客户端若已是 `1.0.0`，会判定“已是最新版本”。
+
+#### 写法示范 B：已有 `1.0.1`、`1.0.2`、`1.0.3`
+```json
+{
+  "fullPackage": {
+    "version": "1.0.0",
+    "downloadUrl": "https://cdn.example.com/full-1.0.0.zip",
+    "description": "首次安装完整包"
+  },
+  "incrementalUpdates": [
+    {
+      "version": "1.0.1",
+      "downloadUrl": "https://cdn.example.com/patch-1.0.1.zip",
+      "description": "1.0.1 热更新"
+    },
+    {
+      "version": "1.0.2",
+      "downloadUrl": "https://cdn.example.com/patch-1.0.2.zip",
+      "description": "1.0.2 内容修复"
+    },
+    {
+      "version": "1.0.3",
+      "downloadUrl": "https://cdn.example.com/patch-1.0.3.zip",
+      "description": "1.0.3 平衡性调整"
+    }
+  ]
+}
+```
+
+> 说明：
+> - 建议按版本从低到高维护补丁（`1.0.1 -> 1.0.2 -> 1.0.3`）。
+> - 客户端当前版本为 `1.0.0` 时，会依次下载并应用三个补丁；
+>   当前版本为 `1.0.2` 时，只会应用 `1.0.3`。
+
 ### 3) `launcher-state.json`
 ```json
 {
