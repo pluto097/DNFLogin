@@ -301,10 +301,13 @@ namespace DNFLogin
 
             using var process = new Process { StartInfo = startInfo };
             process.Start();
-            await process.WaitForExitAsync().ConfigureAwait(false);
 
-            var stdout = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-            var stderr = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+
+            await process.WaitForExitAsync().ConfigureAwait(false);
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
 
             if (process.ExitCode != 0)
             {
