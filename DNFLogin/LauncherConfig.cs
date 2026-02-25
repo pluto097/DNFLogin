@@ -14,6 +14,7 @@ internal sealed class LauncherConfig
 {
     private const string ConfigFileName = "launcher-config.json";
     private const string StateFileName = "launcher-state.json";
+    private const string DefaultUpdateManifestUrl = "https://example.com/update-manifest.json";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -25,6 +26,7 @@ internal sealed class LauncherConfig
     public required string GameExePath { get; init; }
     public required string BaseResourceCheckFile { get; init; }
     public required string UpdateManifestUrl { get; init; }
+    public required string SevenZipPath { get; init; }
 
     public static LauncherConfig LoadOrCreate(string baseDirectory)
     {
@@ -36,7 +38,8 @@ internal sealed class LauncherConfig
                 Aria2Path = "aria2c",
                 GameExePath = "DNF.exe",
                 BaseResourceCheckFile = "Script.pvf",
-                UpdateManifestUrl = "https://example.com/update-manifest.json"
+                UpdateManifestUrl = DefaultUpdateManifestUrl,
+                SevenZipPath = "7z"
             };
 
             File.WriteAllText(configPath, JsonSerializer.Serialize(defaultConfig, JsonOptions));
@@ -44,14 +47,31 @@ internal sealed class LauncherConfig
         }
 
         var content = File.ReadAllText(configPath);
-        var config = JsonSerializer.Deserialize<LauncherConfig>(content, JsonOptions)
+        var rawConfig = JsonSerializer.Deserialize<LauncherConfigData>(content, JsonOptions)
             ?? throw new InvalidOperationException("无法解析 launcher-config.json");
+
+        var shouldSaveMigratedConfig = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl)
+            || string.IsNullOrWhiteSpace(rawConfig.SevenZipPath);
+        var config = new LauncherConfig
+        {
+            Aria2Path = rawConfig.Aria2Path ?? string.Empty,
+            GameExePath = rawConfig.GameExePath ?? string.Empty,
+            BaseResourceCheckFile = rawConfig.BaseResourceCheckFile ?? "Script.pvf",
+            UpdateManifestUrl = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl) ? DefaultUpdateManifestUrl : rawConfig.UpdateManifestUrl!,
+            SevenZipPath = string.IsNullOrWhiteSpace(rawConfig.SevenZipPath) ? "7z" : rawConfig.SevenZipPath!
+        };
 
         if (string.IsNullOrWhiteSpace(config.Aria2Path)
             || string.IsNullOrWhiteSpace(config.GameExePath)
-            || string.IsNullOrWhiteSpace(config.UpdateManifestUrl))
+            || string.IsNullOrWhiteSpace(config.UpdateManifestUrl)
+            || string.IsNullOrWhiteSpace(config.SevenZipPath))
         {
-            throw new InvalidOperationException("launcher-config.json 缺少必要字段: aria2Path、gameExePath 或 updateManifestUrl");
+            throw new InvalidOperationException("launcher-config.json 缺少必要字段: aria2Path、gameExePath、updateManifestUrl 或 sevenZipPath");
+        }
+
+        if (shouldSaveMigratedConfig)
+        {
+            File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
         }
 
         return config;
@@ -120,6 +140,15 @@ internal sealed class LauncherConfig
         public static VersionComparer Instance { get; } = new();
 
         public int Compare(string? x, string? y) => CompareVersions(x, y);
+    }
+
+    private sealed class LauncherConfigData
+    {
+        public string? Aria2Path { get; init; }
+        public string? GameExePath { get; init; }
+        public string? BaseResourceCheckFile { get; init; }
+        public string? UpdateManifestUrl { get; init; }
+        public string? SevenZipPath { get; init; }
     }
 }
 

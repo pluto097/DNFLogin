@@ -17,7 +17,8 @@
   "aria2Path": "aria2c",
   "gameExePath": "DNF.exe",
   "baseResourceCheckFile": "Script.pvf",
-  "updateManifestUrl": "https://example.com/update-manifest.json"
+  "updateManifestUrl": "https://example.com/update-manifest.json",
+  "sevenZipPath": "7z"
 }
 ```
 
@@ -25,19 +26,20 @@
 - `gameExePath`: 更新完成后启动的 EXE（相对/绝对路径都可）。
 - `baseResourceCheckFile`: 用于判断是否需要完整包的本地文件。
 - `updateManifestUrl`: 云端 `update-manifest.json` 的直链地址，程序启动时自动请求。
+- `sevenZipPath`: 外置 7z 解压程序路径（默认 `7z`，可填绝对路径，如 `C:\\Program Files\\7-Zip\\7z.exe`）。
 
 ### 2) 云端 `update-manifest.json`（由 `updateManifestUrl` 指向）
 ```json
 {
   "fullPackage": {
     "version": "1.0.0",
-    "downloadUrl": "https://example.com/full-package.zip",
+    "downloadUrl": "https://example.com/full-package.7z",
     "description": "首次安装完整包"
   },
   "incrementalUpdates": [
     {
       "version": "1.0.1",
-      "downloadUrl": "https://example.com/patch-1.0.1.zip",
+      "downloadUrl": "https://example.com/patch-1.0.1.7z",
       "description": "示例补丁"
     }
   ]
@@ -53,7 +55,7 @@
 {
   "fullPackage": {
     "version": "1.0.0",
-    "downloadUrl": "https://cdn.example.com/full-1.0.0.zip",
+    "downloadUrl": "https://cdn.example.com/full-1.0.0.7z",
     "description": "首次安装完整包"
   },
   "incrementalUpdates": []
@@ -69,23 +71,23 @@
 {
   "fullPackage": {
     "version": "1.0.0",
-    "downloadUrl": "https://cdn.example.com/full-1.0.0.zip",
+    "downloadUrl": "https://cdn.example.com/full-1.0.0.7z",
     "description": "首次安装完整包"
   },
   "incrementalUpdates": [
     {
       "version": "1.0.1",
-      "downloadUrl": "https://cdn.example.com/patch-1.0.1.zip",
+      "downloadUrl": "https://cdn.example.com/patch-1.0.1.7z",
       "description": "1.0.1 热更新"
     },
     {
       "version": "1.0.2",
-      "downloadUrl": "https://cdn.example.com/patch-1.0.2.zip",
+      "downloadUrl": "https://cdn.example.com/patch-1.0.2.7z",
       "description": "1.0.2 内容修复"
     },
     {
       "version": "1.0.3",
-      "downloadUrl": "https://cdn.example.com/patch-1.0.3.zip",
+      "downloadUrl": "https://cdn.example.com/patch-1.0.3.7z",
       "description": "1.0.3 平衡性调整"
     }
   ]
@@ -108,5 +110,6 @@
 
 ## 使用说明
 1. 安装并确保 `aria2c` 可执行（或在 `launcher-config.json` 填绝对路径）。
-2. 在云端维护 `update-manifest.json`（配置完整包和补丁地址），并把直链填入 `launcher-config.json` 的 `updateManifestUrl`。
-3. 启动程序，程序会自动拉取云端清单并完成下载/更新，最终启动 `gameExePath`。
+2. 安装并确保 `7z` 可执行（或在 `launcher-config.json` 里配置 `sevenZipPath`）。
+3. 在云端维护 `update-manifest.json`（配置完整包和补丁地址），并把直链填入 `launcher-config.json` 的 `updateManifestUrl`。
+4. 启动程序，程序会自动拉取云端清单并完成下载/更新，最终启动 `gameExePath`。

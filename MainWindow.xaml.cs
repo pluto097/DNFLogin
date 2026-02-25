@@ -3,7 +3,6 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
@@ -187,26 +186,27 @@ namespace DNFLogin
 
         private async Task DownloadAndExtractByAria2Async(LauncherConfig config, UpdatePackage package, string displayName, double stageStart, double stageSpan)
         {
-            var tempZip = CreateLocalCacheFile();
+            var tempArchive = CreateLocalCacheFile(package.DownloadUrl);
             try
             {
                 ReportStageProgress($"准备下载{displayName}", package.Description, 0, stageStart, stageSpan);
-                await RunAria2DownloadAsync(config.Aria2Path, package.DownloadUrl, tempZip, (percent, detail) =>
+                await RunAria2DownloadAsync(config.Aria2Path, package.DownloadUrl, tempArchive, (percent, detail) =>
                 {
                     var normalized = Math.Clamp(percent * 0.85, 0, 85);
                     var text = string.IsNullOrWhiteSpace(package.Description) ? detail : $"{detail}\n{package.Description}";
                     ReportStageProgress($"正在下载{displayName}", text, normalized, stageStart, stageSpan);
                 }).ConfigureAwait(false);
 
-                ReportStageProgress($"正在解压{displayName}", "正在解压文件，请稍候", 90, stageStart, stageSpan);
-                ZipFile.ExtractToDirectory(tempZip, _baseDirectory, true);
+                ReportStageProgress($"正在解压{displayName}", "正在使用 7z 验证并解压文件，请稍候", 90, stageStart, stageSpan);
+                EnsureValidArchiveFile(tempArchive, displayName, package.DownloadUrl);
+                await ExtractBySevenZipAsync(config.SevenZipPath, tempArchive, displayName, package.DownloadUrl).ConfigureAwait(false);
                 ReportStageProgress($"完成{displayName}", $"已更新到版本 {package.Version}", 100, stageStart, stageSpan);
             }
             finally
             {
-                if (File.Exists(tempZip))
+                if (File.Exists(tempArchive))
                 {
-                    File.Delete(tempZip);
+                    File.Delete(tempArchive);
                 }
             }
         }
@@ -254,11 +254,63 @@ namespace DNFLogin
             onProgress(100, "下载完成");
         }
 
-        private static string CreateLocalCacheFile()
+        private static string CreateLocalCacheFile(string downloadUrl)
         {
             var cacheDirectory = Path.Combine(AppContext.BaseDirectory, "cache");
             Directory.CreateDirectory(cacheDirectory);
-            return Path.Combine(cacheDirectory, $"update-{Guid.NewGuid():N}.zip");
+
+            var extension = GetArchiveExtension(downloadUrl);
+            return Path.Combine(cacheDirectory, $"update-{Guid.NewGuid():N}{extension}");
+        }
+
+        private static string GetArchiveExtension(string downloadUrl)
+        {
+            if (Uri.TryCreate(downloadUrl, UriKind.Absolute, out var uri))
+            {
+                var ext = Path.GetExtension(uri.AbsolutePath);
+                if (!string.IsNullOrWhiteSpace(ext))
+                {
+                    return ext;
+                }
+            }
+
+            return ".7z";
+        }
+
+        private static void EnsureValidArchiveFile(string filePath, string displayName, string downloadUrl)
+        {
+            var fileInfo = new FileInfo(filePath);
+            if (!fileInfo.Exists || fileInfo.Length <= 0)
+            {
+                throw new InvalidOperationException($"{displayName} 下载文件为空，请检查下载地址是否可用: {downloadUrl}");
+            }
+        }
+
+        private async Task ExtractBySevenZipAsync(string sevenZipPath, string archivePath, string displayName, string downloadUrl)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = sevenZipPath,
+                Arguments = $"x -y \"{archivePath}\" -o\"{_baseDirectory}\"",
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = _baseDirectory
+            };
+
+            using var process = new Process { StartInfo = startInfo };
+            process.Start();
+            await process.WaitForExitAsync().ConfigureAwait(false);
+
+            var stdout = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+            var stderr = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
+
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"{displayName} 解压失败，请检查 sevenZipPath 和压缩包格式。downloadUrl: {downloadUrl}\n7z 退出码: {process.ExitCode}\n{stderr}\n{stdout}");
+            }
         }
 
         private void LaunchGame(LauncherConfig config)
