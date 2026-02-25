@@ -1,68 +1,39 @@
 ﻿using AduSkin.Controls.Metro;
 using System;
-using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
-using System.Linq;
-using System.Net.Http;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
-using System.Windows.Threading;
-using System.ComponentModel;
 
 namespace DNFLogin
 {
-    /// <summary>
-    /// Interaction logic for MainWindow.xaml
-    /// </summary>
     public partial class MainWindow : AduWindow
     {
-        private static readonly HttpClient HttpClient = new();
-        private static readonly JsonSerializerOptions JsonOptions = new()
-        {
-            PropertyNameCaseInsensitive = true
-        };
         private static readonly Uri DefaultBackgroundUri = new("pack://application:,,,/Assets/default-bg-img.png", UriKind.Absolute);
 
-        private readonly string _backgroundApiUrl;
-        private readonly string _fullPackageApiUrl;
-        private readonly string _versionApiUrlTemplate;
-        private ImageBrush? _backgroundBrush;
-        private readonly DispatcherTimer _backgroundRotationTimer;
-        private IReadOnlyList<string> _backgroundImageUrls = Array.Empty<string>();
-        private int _backgroundImageIndex;
-        private bool _rotationInitialized;
+        private readonly string _baseDirectory;
         private bool _hasShown;
-        private bool _loginWindowOpened;
         private double _globalProgress;
         private bool _updateStarted;
+        private ImageBrush? _backgroundBrush;
 
         public MainWindow()
         {
             InitializeComponent();
-            Title = LoginConfig.GetWindowTitle();
+            _baseDirectory = AppContext.BaseDirectory;
+            Title = "DOF 下载与更新器";
             SetDefaultBackground();
-            var baseUrl = LoginConfig.GetBaseUrl().TrimEnd('/');
-            _backgroundApiUrl = $"{baseUrl}/api/v1/client/big-pic-list";
-            _fullPackageApiUrl = $"{baseUrl}/api/v1/client/full-package";
-            _versionApiUrlTemplate = $"{baseUrl}/api/v1/client/version";
-            _backgroundRotationTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromSeconds(10)
-            };
-            _backgroundRotationTimer.Tick += OnBackgroundRotationTick;
         }
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
-            _ = LoadBackgroundAsync();
             _ = RunUpdateFlowAsync();
         }
 
@@ -79,38 +50,8 @@ namespace DNFLogin
             FadeInWindow();
         }
 
-        private async Task LoadBackgroundAsync()
-        {
-            try
-            {
-                var json = await HttpClient.GetStringAsync(_backgroundApiUrl).ConfigureAwait(false);
-                Debug.WriteLine($"背景接口响应: {json}");
-                var items = JsonSerializer.Deserialize<List<BackgroundImageItem>>(json, JsonOptions);
-                var imageUrls = items?
-                    .Select(i => i.ImageUrl)
-                    .Where(url => Uri.TryCreate(url, UriKind.Absolute, out _))
-                    .Distinct()
-                    .ToList();
-
-                if (imageUrls is null || imageUrls.Count == 0)
-                {
-                    return;
-                }
-
-                _backgroundImageUrls = imageUrls;
-                _backgroundImageIndex = _backgroundImageUrls.Count - 1;
-
-                await StartBackgroundRotationAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"无法加载背景图片: {ex}");
-            }
-        }
-
         protected override void OnClosing(CancelEventArgs e)
         {
-            _backgroundRotationTimer.Stop();
             base.OnClosing(e);
         }
 
@@ -150,30 +91,6 @@ namespace DNFLogin
             return _backgroundBrush;
         }
 
-        private async void OnBackgroundRotationTick(object? sender, EventArgs e)
-        {
-            if (_backgroundImageUrls.Count <= 1)
-            {
-                _backgroundRotationTimer.Stop();
-                return;
-            }
-
-            _backgroundImageIndex--;
-            if (_backgroundImageIndex < 0)
-            {
-                _backgroundImageIndex = _backgroundImageUrls.Count - 1;
-            }
-
-            try
-            {
-                await TrySetBackgroundFromUrlAsync(_backgroundImageUrls[_backgroundImageIndex]);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"无法切换背景图片: {ex}");
-            }
-        }
-
         private void SetDefaultBackground()
         {
             if (TryGetBackgroundBrush() is not ImageBrush brush)
@@ -191,98 +108,6 @@ namespace DNFLogin
             brush.ImageSource = bitmap;
         }
 
-        private void SetBackgroundImage(byte[] imageBytes)
-        {
-            if (TryGetBackgroundBrush() is not ImageBrush brush)
-            {
-                return;
-            }
-
-            using var memory = new MemoryStream(imageBytes);
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.StreamSource = memory;
-            bitmap.EndInit();
-            bitmap.Freeze();
-
-            brush.ImageSource = bitmap;
-        }
-
-        private async Task TrySetBackgroundFromUrlAsync(string imageUrl)
-        {
-            if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var uri))
-            {
-                return;
-            }
-
-            Debug.WriteLine($"切换背景: {uri}");
-            var imageBytes = await HttpClient.GetByteArrayAsync(uri).ConfigureAwait(false);
-
-            await AnimateBrushOpacityAsync(0.0, 0.2).ConfigureAwait(false);
-            await Dispatcher.InvokeAsync(() => SetBackgroundImage(imageBytes));
-            await AnimateBrushOpacityAsync(1.0, 0.2).ConfigureAwait(false);
-        }
-
-        private Task AnimateBrushOpacityAsync(double toOpacity, double durationSeconds)
-        {
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            void StartAnimation()
-            {
-                if (TryGetBackgroundBrush() is not ImageBrush brush)
-                {
-                    tcs.TrySetResult(true);
-                    return;
-                }
-
-                var animation = new DoubleAnimation
-                {
-                    To = toOpacity,
-                    Duration = TimeSpan.FromSeconds(durationSeconds),
-                    FillBehavior = FillBehavior.HoldEnd
-                };
-
-                animation.Completed += (_, _) => tcs.TrySetResult(true);
-                brush.BeginAnimation(Brush.OpacityProperty, animation);
-            }
-
-            if (Dispatcher.CheckAccess())
-            {
-                StartAnimation();
-            }
-            else
-            {
-                _ = Dispatcher.InvokeAsync(StartAnimation);
-            }
-
-            return tcs.Task;
-        }
-
-        private async Task StartBackgroundRotationAsync()
-        {
-            if (_rotationInitialized)
-            {
-                return;
-            }
-
-            _rotationInitialized = true;
-
-            await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-
-            if (_backgroundImageUrls.Count == 0)
-            {
-                return;
-            }
-
-            await TrySetBackgroundFromUrlAsync(_backgroundImageUrls[_backgroundImageIndex]).ConfigureAwait(false);
-
-            if (_backgroundImageUrls.Count > 1 && !_backgroundRotationTimer.IsEnabled)
-            {
-                _backgroundRotationTimer.Start();
-            }
-        }
-
         private async Task RunUpdateFlowAsync()
         {
             if (_updateStarted)
@@ -292,44 +117,45 @@ namespace DNFLogin
 
             _updateStarted = true;
 
-            const double baseSpan = 40d;
-            const double incrementalSpan = 60d;
-
             try
             {
-                ReportStageProgress("正在初始化", "准备检查本地资源", 0, 0, baseSpan);
-                await EnsureBasePackageAsync(0, baseSpan).ConfigureAwait(false);
+                ReportProgress("正在初始化", "读取本地配置文件", 5, 5);
+                var config = LauncherConfig.LoadOrCreate(_baseDirectory);
+                var manifest = LauncherConfig.LoadOrCreateManifest(_baseDirectory);
+                var state = LauncherConfig.LoadOrCreateState(_baseDirectory);
 
-                var currentVersion = LoginConfig.GetGameVersion();
-                ReportProgress("正在检查版本", $"当前版本：{currentVersion}", 100, baseSpan);
-                var updates = await FetchIncrementalUpdatesAsync(currentVersion).ConfigureAwait(false);
+                const double baseSpan = 40d;
+                const double incrementalSpan = 60d;
+
+                await EnsureBasePackageAsync(config, manifest, state, 0, baseSpan).ConfigureAwait(false);
+
+                var currentVersion = state.CurrentVersion;
+                var updates = LauncherConfig.ResolvePendingUpdates(manifest, currentVersion);
 
                 if (updates.Count == 0)
                 {
                     ReportProgress("已是最新版本", $"当前版本：{currentVersion}", 100, 100);
-                    await Task.Delay(600).ConfigureAwait(false);
-                    OpenLoginWindow();
+                    await Task.Delay(400).ConfigureAwait(false);
+                    LaunchGame(config);
                     return;
                 }
 
-                var perUpdateSpan = updates.Count > 0 ? incrementalSpan / updates.Count : incrementalSpan;
+                var perUpdateSpan = incrementalSpan / updates.Count;
 
                 for (var i = 0; i < updates.Count; i++)
                 {
                     var update = updates[i];
-                    var versionLabel = update.Version ?? $"补丁{i + 1}";
                     var stageStart = baseSpan + (perUpdateSpan * i);
+                    await DownloadAndExtractByAria2Async(config, update, $"增量包 {update.Version}", stageStart, perUpdateSpan)
+                        .ConfigureAwait(false);
 
-                    var description = FormatUpdateDescription(update.Description);
-                    ReportStageProgress("正在准备更新", CombineDetail($"即将更新至 {versionLabel}", description), 0, stageStart, perUpdateSpan);
-                    await DownloadAndExtractAsync(update.DownloadUrl!, $"资源包 {versionLabel}", stageStart, perUpdateSpan, description).ConfigureAwait(false);
-                    LoginConfig.SetGameVersion(update.Version);
-                    ReportStageProgress("更新完成", CombineDetail($"已安装版本 {versionLabel}", description), 100, stageStart, perUpdateSpan);
+                    state.CurrentVersion = update.Version;
+                    LauncherConfig.SaveState(_baseDirectory, state);
                 }
 
-                ReportProgress("所有更新完成", "即将进入登录界面", 100, 100);
+                ReportProgress("所有更新完成", $"当前版本：{state.CurrentVersion}", 100, 100);
                 await Task.Delay(600).ConfigureAwait(false);
-                OpenLoginWindow();
+                LaunchGame(config);
             }
             catch (Exception ex)
             {
@@ -337,109 +163,95 @@ namespace DNFLogin
             }
         }
 
-        private async Task EnsureBasePackageAsync(double stageStart, double stageSpan)
+        private async Task EnsureBasePackageAsync(LauncherConfig config, UpdateManifest manifest, LauncherState state, double stageStart, double stageSpan)
         {
-            var scriptPath = Path.Combine(AppContext.BaseDirectory, "Script.pvf");
-            if (File.Exists(scriptPath))
+            var checkFile = Path.Combine(_baseDirectory, config.BaseResourceCheckFile);
+            if (File.Exists(checkFile))
             {
-                LoginConfig.GetGameVersion();
-                ReportStageProgress("正在校验完整性", "检测到基础资源，跳过完整包下载", 100, stageStart, stageSpan);
+                ReportStageProgress("基础资源检查", "检测到基础资源，跳过完整包下载", 100, stageStart, stageSpan);
                 return;
             }
 
-            ReportStageProgress("正在校验完整性", "缺少基础资源，准备下载完整包", 10, stageStart, stageSpan);
-            var package = await FetchFullPackageInfoAsync().ConfigureAwait(false)
-                          ?? throw new InvalidOperationException("无法获取完整资源包信息");
-
-            if (string.IsNullOrWhiteSpace(package.DownloadUrl))
+            if (manifest.FullPackage is null || string.IsNullOrWhiteSpace(manifest.FullPackage.DownloadUrl))
             {
-                throw new InvalidOperationException("完整包下载地址为空");
+                throw new InvalidOperationException("缺少基础资源且 update-manifest.json 未配置 fullPackage.downloadUrl");
             }
 
-            await DownloadAndExtractAsync(package.DownloadUrl, "完整资源包", stageStart, stageSpan).ConfigureAwait(false);
+            await DownloadAndExtractByAria2Async(config, manifest.FullPackage, "完整资源包", stageStart, stageSpan)
+                .ConfigureAwait(false);
 
-            var version = string.IsNullOrWhiteSpace(package.Version)
-                ? LoginConfig.GetGameVersion()
-                : package.Version!.Trim();
-
-            LoginConfig.SetGameVersion(version);
-            ReportStageProgress("正在校验完整性", "完整资源包更新完成", 100, stageStart, stageSpan);
+            state.CurrentVersion = manifest.FullPackage.Version;
+            LauncherConfig.SaveState(_baseDirectory, state);
+            ReportStageProgress("基础资源检查", "完整资源包安装完成", 100, stageStart, stageSpan);
         }
 
-        private async Task<FullPackageResponse?> FetchFullPackageInfoAsync()
+        private async Task DownloadAndExtractByAria2Async(LauncherConfig config, UpdatePackage package, string displayName, double stageStart, double stageSpan)
         {
-            var json = await HttpClient.GetStringAsync(_fullPackageApiUrl).ConfigureAwait(false);
-            return JsonSerializer.Deserialize<FullPackageResponse>(json, JsonOptions);
-        }
-
-        private async Task<List<IncrementalUpdate>> FetchIncrementalUpdatesAsync(string currentVersion)
-        {
-            var url = $"{_versionApiUrlTemplate}/{Uri.EscapeDataString(currentVersion)}";
-            var json = await HttpClient.GetStringAsync(url).ConfigureAwait(false);
-            var updates = JsonSerializer.Deserialize<List<IncrementalUpdate>>(json, JsonOptions) ?? new List<IncrementalUpdate>();
-
-            return updates
-                .Where(u => !string.IsNullOrWhiteSpace(u?.DownloadUrl))
-                .OrderBy(u => u!.Version, StringComparer.OrdinalIgnoreCase)
-                .ToList()!;
-        }
-
-        private async Task DownloadAndExtractAsync(string downloadUrl, string displayName, double stageStart, double stageSpan, string? descriptionDetail = null)
-        {
-            if (string.IsNullOrWhiteSpace(downloadUrl))
-            {
-                throw new InvalidOperationException("下载地址无效");
-            }
-
-            var tempFile = CreateLocalCacheFile();
+            var tempZip = CreateLocalCacheFile();
             try
             {
-                using var response = await HttpClient.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
-                response.EnsureSuccessStatusCode();
-
-                var totalBytes = response.Content.Headers.ContentLength ?? -1L;
-                var buffer = new byte[81920];
-
-                await using (var destination = File.OpenWrite(tempFile))
-                await using (var source = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                ReportStageProgress($"准备下载{displayName}", package.Description, 0, stageStart, stageSpan);
+                await RunAria2DownloadAsync(config.Aria2Path, package.DownloadUrl, tempZip, (percent, detail) =>
                 {
-                    long read = 0;
-                    int bytesRead;
-                    while ((bytesRead = await source.ReadAsync(buffer.AsMemory(0, buffer.Length)).ConfigureAwait(false)) > 0)
-                    {
-                        await destination.WriteAsync(buffer.AsMemory(0, bytesRead)).ConfigureAwait(false);
-                        read += bytesRead;
+                    var normalized = Math.Clamp(percent * 0.85, 0, 85);
+                    var text = string.IsNullOrWhiteSpace(package.Description) ? detail : $"{detail}\n{package.Description}";
+                    ReportStageProgress($"正在下载{displayName}", text, normalized, stageStart, stageSpan);
+                }).ConfigureAwait(false);
 
-                        if (totalBytes > 0)
-                        {
-                            var percent = Math.Clamp((read / (double)totalBytes) * 80d, 0d, 80d);
-                            var detail = CombineDetail($"下载 {displayName}: {FormatSize(read)} / {FormatSize(totalBytes)}", descriptionDetail);
-                            ReportStageProgress($"正在下载{displayName}", detail, percent, stageStart, stageSpan);
-                        }
-                        else
-                        {
-                            var detail = CombineDetail($"下载 {displayName}: {FormatSize(read)}", descriptionDetail);
-                            ReportStageProgress($"正在下载{displayName}", detail, 60, stageStart, stageSpan);
-                        }
-                    }
-                }
-
-                ReportStageProgress($"正在下载{displayName}", CombineDetail($"下载 {displayName} 完成", descriptionDetail), 85, stageStart, stageSpan);
-                ReportStageProgress($"正在解压{displayName}", CombineDetail($"正在解压 {displayName}", descriptionDetail), 90, stageStart, stageSpan);
-                ZipFile.ExtractToDirectory(tempFile, AppContext.BaseDirectory, true);
-                ReportStageProgress($"正在解压{displayName}", CombineDetail($"完成解压 {displayName}", descriptionDetail), 100, stageStart, stageSpan);
+                ReportStageProgress($"正在解压{displayName}", "正在解压文件，请稍候", 90, stageStart, stageSpan);
+                ZipFile.ExtractToDirectory(tempZip, _baseDirectory, true);
+                ReportStageProgress($"完成{displayName}", $"已更新到版本 {package.Version}", 100, stageStart, stageSpan);
             }
             finally
             {
-                try
+                if (File.Exists(tempZip))
                 {
-                    File.Delete(tempFile);
-                }
-                catch
-                {
-                    // ignored
+                    File.Delete(tempZip);
                 }
             }
+        }
+
+        private async Task RunAria2DownloadAsync(string aria2Path, string url, string outputFile, Action<double, string> onProgress)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = aria2Path,
+                Arguments = $"--allow-overwrite=true --auto-file-renaming=false --summary-interval=1 --console-log-level=notice --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"",
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = _baseDirectory
+            };
+
+            using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            process.Start();
+
+            var progressRegex = new Regex(@"\((\d+)%\)", RegexOptions.Compiled);
+
+            while (!process.HasExited)
+            {
+                var line = await process.StandardOutput.ReadLineAsync().ConfigureAwait(false);
+                if (line is null)
+                {
+                    await Task.Delay(100).ConfigureAwait(false);
+                    continue;
+                }
+
+                var match = progressRegex.Match(line);
+                if (match.Success && double.TryParse(match.Groups[1].Value, out var value))
+                {
+                    onProgress(value, line.Trim());
+                }
+            }
+
+            var stderr = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"aria2 下载失败，退出码 {process.ExitCode}: {stderr}");
+            }
+
+            onProgress(100, "下载完成");
         }
 
         private static string CreateLocalCacheFile()
@@ -447,6 +259,27 @@ namespace DNFLogin
             var cacheDirectory = Path.Combine(AppContext.BaseDirectory, "cache");
             Directory.CreateDirectory(cacheDirectory);
             return Path.Combine(cacheDirectory, $"update-{Guid.NewGuid():N}.zip");
+        }
+
+        private void LaunchGame(LauncherConfig config)
+        {
+            var exePath = Path.IsPathRooted(config.GameExePath)
+                ? config.GameExePath
+                : Path.Combine(_baseDirectory, config.GameExePath);
+
+            if (!File.Exists(exePath))
+            {
+                throw new FileNotFoundException($"未找到配置的游戏启动文件: {exePath}");
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = exePath,
+                WorkingDirectory = Path.GetDirectoryName(exePath) ?? _baseDirectory,
+                UseShellExecute = true
+            });
+
+            Dispatcher.Invoke(Close);
         }
 
         private void ReportProgress(string title, string detail, double? stepPercent = null, double? globalPercent = null)
@@ -478,69 +311,5 @@ namespace DNFLogin
             var global = stageStart + (stageSpan * (normalizedStep / 100d));
             ReportProgress(title, detail, normalizedStep, global);
         }
-
-        private static string FormatSize(long bytes)
-        {
-            if (bytes <= 0)
-            {
-                return "0 B";
-            }
-
-            string[] units = { "B", "KB", "MB", "GB", "TB" };
-            double size = bytes;
-            var unit = 0;
-            while (size >= 1024 && unit < units.Length - 1)
-            {
-                size /= 1024;
-                unit++;
-            }
-
-            return $"{size:0.##} {units[unit]}";
-        }
-
-        private static string FormatUpdateDescription(string? description)
-        {
-            return string.IsNullOrWhiteSpace(description)
-                ? "暂无更新说明"
-                : $"更新说明：{description.Trim()}";
-        }
-
-        private static string CombineDetail(string primary, string? extra)
-        {
-            return string.IsNullOrWhiteSpace(extra) ? primary : $"{primary}\n{extra}";
-        }
-
-        private void OpenLoginWindow()
-        {
-            if (_loginWindowOpened)
-            {
-                return;
-            }
-
-            _loginWindowOpened = true;
-
-            Dispatcher.InvokeAsync(() =>
-            {
-                var loginWindow = new LoginWindow();
-                Application.Current.MainWindow = loginWindow;
-                loginWindow.Show();
-                Close();
-            });
-        }
-
-
-        private sealed record BackgroundImageItem(
-            [property: JsonPropertyName("id")] int Id,
-            [property: JsonPropertyName("title")] string? Title,
-            [property: JsonPropertyName("imageUrl")] string? ImageUrl);
-
-        private sealed record FullPackageResponse(
-            [property: JsonPropertyName("version")] string? Version,
-            [property: JsonPropertyName("downloadUrl")] string? DownloadUrl);
-
-        private sealed record IncrementalUpdate(
-            [property: JsonPropertyName("version")] string? Version,
-            [property: JsonPropertyName("downloadUrl")] string? DownloadUrl,
-            [property: JsonPropertyName("description")] string? Description);
     }
 }
