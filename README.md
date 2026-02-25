@@ -113,3 +113,11 @@
 2. 安装并确保 `7z` 可执行（或在 `launcher-config.json` 里配置 `sevenZipPath`）。
 3. 在云端维护 `update-manifest.json`（配置完整包和补丁地址），并把直链填入 `launcher-config.json` 的 `updateManifestUrl`。
 4. 启动程序，程序会自动拉取云端清单并完成下载/更新，最终启动 `gameExePath`。
+
+
+构建方式
+1.fork本仓库
+2.编译
+```
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+```
