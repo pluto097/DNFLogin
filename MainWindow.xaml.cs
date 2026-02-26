@@ -209,9 +209,26 @@ namespace DNFLogin
             }
             finally
             {
-                if (File.Exists(tempArchive))
+                try
                 {
-                    File.Delete(tempArchive);
+                    var cacheDirectory = Path.GetDirectoryName(tempArchive) ?? _baseDirectory;
+                    var firstPartFileName = Path.GetFileName(tempArchive);
+                    var firstPartExtension = Path.GetExtension(firstPartFileName);
+                    var filePrefix = firstPartFileName.EndsWith(firstPartExtension, StringComparison.OrdinalIgnoreCase)
+                        ? firstPartFileName[..^firstPartExtension.Length]
+                        : firstPartFileName;
+            
+                    var pattern = $"{filePrefix}.*";
+                    var files = Directory.GetFiles(cacheDirectory, pattern);
+            
+                    foreach (var file in files)
+                    {
+                        File.Delete(file);
+                    }
+                }
+                catch
+                {
+                    // 清理失败忽略
                 }
             }
         }
