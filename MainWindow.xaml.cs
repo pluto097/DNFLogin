@@ -3,6 +3,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
@@ -121,14 +122,13 @@ namespace DNFLogin
                 ReportProgress("正在初始化", "读取本地配置并请求云端更新配置", 5, 5);
                 var config = LauncherConfig.LoadOrCreate(_baseDirectory);
                 var manifest = await LauncherConfig.LoadManifestFromRemoteAsync(config).ConfigureAwait(false);
-                var state = LauncherConfig.LoadOrCreateState(_baseDirectory);
 
                 const double baseSpan = 40d;
                 const double incrementalSpan = 60d;
 
-                await EnsureBasePackageAsync(config, manifest, state, 0, baseSpan).ConfigureAwait(false);
+                await EnsureBasePackageAsync(config, manifest, 0, baseSpan).ConfigureAwait(false);
 
-                var currentVersion = state.CurrentVersion;
+                var currentVersion = config.CurrentVersion;
                 var updates = LauncherConfig.ResolvePendingUpdates(manifest, currentVersion);
 
                 if (updates.Count == 0)
@@ -148,11 +148,11 @@ namespace DNFLogin
                     await DownloadAndExtractByAria2Async(config, update, $"增量包 {update.Version}", stageStart, perUpdateSpan)
                         .ConfigureAwait(false);
 
-                    state.CurrentVersion = update.Version;
-                    LauncherConfig.SaveState(_baseDirectory, state);
+                    config.CurrentVersion = update.Version;
+                    LauncherConfig.SaveConfig(_baseDirectory, config);
                 }
 
-                ReportProgress("所有更新完成", $"当前版本：{state.CurrentVersion}", 100, 100);
+                ReportProgress("所有更新完成", $"当前版本：{config.CurrentVersion}", 100, 100);
                 await Task.Delay(600).ConfigureAwait(false);
                 LaunchGame(config);
             }
@@ -162,7 +162,7 @@ namespace DNFLogin
             }
         }
 
-        private async Task EnsureBasePackageAsync(LauncherConfig config, UpdateManifest manifest, LauncherState state, double stageStart, double stageSpan)
+        private async Task EnsureBasePackageAsync(LauncherConfig config, UpdateManifest manifest, double stageStart, double stageSpan)
         {
             var checkFile = Path.Combine(_baseDirectory, config.BaseResourceCheckFile);
             if (File.Exists(checkFile))
@@ -179,27 +179,30 @@ namespace DNFLogin
             await DownloadAndExtractByAria2Async(config, manifest.FullPackage, "完整资源包", stageStart, stageSpan)
                 .ConfigureAwait(false);
 
-            state.CurrentVersion = manifest.FullPackage.Version;
-            LauncherConfig.SaveState(_baseDirectory, state);
+            config.CurrentVersion = manifest.FullPackage.Version;
+            LauncherConfig.SaveConfig(_baseDirectory, config);
             ReportStageProgress("基础资源检查", "完整资源包安装完成", 100, stageStart, stageSpan);
         }
 
         private async Task DownloadAndExtractByAria2Async(LauncherConfig config, UpdatePackage package, string displayName, double stageStart, double stageSpan)
         {
-            var tempArchive = CreateLocalCacheFile(package.DownloadUrl);
+            var downloadUrls = GetDownloadUrls(package);
+            var isMultiPart = downloadUrls.Count > 1;
+            var tempArchive = CreateLocalCacheFile(downloadUrls[0]);
             try
             {
                 ReportStageProgress($"准备下载{displayName}", package.Description, 0, stageStart, stageSpan);
-                await RunAria2DownloadAsync(config.Aria2Path, package.DownloadUrl, tempArchive, (percent, detail) =>
+                await RunAria2DownloadAsync(config.Aria2Path, downloadUrls, tempArchive, (percent, detail) =>
                 {
                     var normalized = Math.Clamp(percent * 0.85, 0, 85);
                     var text = string.IsNullOrWhiteSpace(package.Description) ? detail : $"{detail}\n{package.Description}";
                     ReportStageProgress($"正在下载{displayName}", text, normalized, stageStart, stageSpan);
                 }).ConfigureAwait(false);
 
+                var extractName = isMultiPart ? $"{displayName}(分卷)" : displayName;
                 ReportStageProgress($"正在解压{displayName}", "正在使用 7z 验证并解压文件，请稍候", 90, stageStart, stageSpan);
-                EnsureValidArchiveFile(tempArchive, displayName, package.DownloadUrl);
-                await ExtractBySevenZipAsync(config.SevenZipPath, tempArchive, displayName, package.DownloadUrl).ConfigureAwait(false);
+                EnsureValidArchiveFile(tempArchive, extractName, string.Join(",", downloadUrls));
+                await ExtractBySevenZipAsync(config.SevenZipPath, tempArchive, extractName, string.Join(",", downloadUrls)).ConfigureAwait(false);
                 ReportStageProgress($"完成{displayName}", $"已更新到版本 {package.Version}", 100, stageStart, stageSpan);
             }
             finally
@@ -211,7 +214,56 @@ namespace DNFLogin
             }
         }
 
-        private async Task RunAria2DownloadAsync(string aria2Path, string url, string outputFile, Action<double, string> onProgress)
+        private static IReadOnlyList<string> GetDownloadUrls(UpdatePackage package)
+        {
+            if (package.DownloadUrls.Count > 0)
+            {
+                var urls = package.DownloadUrls.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+                if (urls.Count > 0)
+                {
+                    return urls;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(package.DownloadUrl))
+            {
+                return [package.DownloadUrl];
+            }
+
+            throw new InvalidOperationException($"版本 {package.Version} 未配置下载地址");
+        }
+
+        private async Task RunAria2DownloadAsync(string aria2Path, IReadOnlyList<string> urls, string outputFile, Action<double, string> onProgress)
+        {
+            if (urls.Count == 1)
+            {
+                await DownloadSingleFileByAria2Async(aria2Path, urls[0], outputFile, onProgress).ConfigureAwait(false);
+                return;
+            }
+
+            var cacheDirectory = Path.GetDirectoryName(outputFile) ?? _baseDirectory;
+            var firstPartFileName = Path.GetFileName(outputFile);
+            var firstPartExtension = Path.GetExtension(firstPartFileName);
+            var filePrefix = firstPartFileName.EndsWith(firstPartExtension, StringComparison.OrdinalIgnoreCase)
+                ? firstPartFileName[..^firstPartExtension.Length]
+                : firstPartFileName;
+
+            for (var i = 0; i < urls.Count; i++)
+            {
+                var partFile = i == 0 ? outputFile : Path.Combine(cacheDirectory, $"{filePrefix}.{i + 1:D3}");
+                var partTitle = $"分卷 {i + 1}/{urls.Count}";
+                await DownloadSingleFileByAria2Async(aria2Path, urls[i], partFile, (partPercent, detail) =>
+                {
+                    var totalPercent = ((i + (partPercent / 100d)) / urls.Count) * 100d;
+                    var detailWithPart = $"{partTitle} | {detail}";
+                    onProgress(totalPercent, LocalizeAria2Line(detailWithPart));
+                }).ConfigureAwait(false);
+            }
+
+            onProgress(100, "下载完成");
+        }
+
+        private async Task DownloadSingleFileByAria2Async(string aria2Path, string url, string outputFile, Action<double, string> onProgress)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -241,7 +293,7 @@ namespace DNFLogin
                 var match = progressRegex.Match(line);
                 if (match.Success && double.TryParse(match.Groups[1].Value, out var value))
                 {
-                    onProgress(value, line.Trim());
+                    onProgress(value, LocalizeAria2Line(line.Trim()));
                 }
             }
 
@@ -252,6 +304,18 @@ namespace DNFLogin
             }
 
             onProgress(100, "下载完成");
+        }
+
+        private static string LocalizeAria2Line(string line)
+        {
+            return line
+                .Replace("GiB", "GB", StringComparison.Ordinal)
+                .Replace("MiB", "MB", StringComparison.Ordinal)
+                .Replace("KiB", "KB", StringComparison.Ordinal)
+                .Replace("CN:", "线程:", StringComparison.Ordinal)
+                .Replace("DL:", "下载速度:", StringComparison.Ordinal)
+                .Replace("ETA:", "剩余时间:", StringComparison.Ordinal)
+                .Replace("MB/s", "MB/s", StringComparison.Ordinal);
         }
 
         private static string CreateLocalCacheFile(string downloadUrl)

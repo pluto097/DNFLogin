@@ -7,6 +7,7 @@
 - 启动时从云端直链拉取 `update-manifest.json` 执行增量更新。
 - 下载器改为 `aria2c`，支持断点续传/高性能下载。
 - 更新完成（或无更新）后自动启动指定 EXE。
+- 下载进度文本单位已本地化：`GB`、`MB/s`、`线程`、`下载速度`、`剩余时间`。
 
 ## 配置文件
 程序目录下会自动生成以下文件：
@@ -18,7 +19,8 @@
   "gameExePath": "DNF.exe",
   "baseResourceCheckFile": "Script.pvf",
   "updateManifestUrl": "https://example.com/update-manifest.json",
-  "sevenZipPath": "7z"
+  "sevenZipPath": "7z",
+  "currentVersion": "0.0.0"
 }
 ```
 
@@ -27,13 +29,17 @@
 - `baseResourceCheckFile`: 用于判断是否需要完整包的本地文件。
 - `updateManifestUrl`: 云端 `update-manifest.json` 的直链地址，程序启动时自动请求。
 - `sevenZipPath`: 外置 7z 解压程序路径（默认 `7z`，可填绝对路径，如 `C:\\Program Files\\7-Zip\\7z.exe`）。
+- `currentVersion`: 当前本地版本号，更新成功后会写回到 `launcher-config.json`。
 
 ### 2) 云端 `update-manifest.json`（由 `updateManifestUrl` 指向）
 ```json
 {
   "fullPackage": {
     "version": "1.0.0",
-    "downloadUrl": "https://example.com/full-package.7z",
+    "downloadUrls": [
+      "https://example.com/full-package.7z.001",
+      "https://example.com/full-package.7z.002"
+    ],
     "description": "首次安装完整包"
   },
   "incrementalUpdates": [
@@ -46,8 +52,8 @@
 }
 ```
 
-- `fullPackage`: 基础资源缺失时下载。
-- `incrementalUpdates`: 按版本号从小到大执行更新。
+- `fullPackage`: 基础资源缺失时下载，支持 `downloadUrl`（单链接）和 `downloadUrls`（多链接分卷）。
+- `incrementalUpdates`: 按版本号从小到大执行更新，同样支持单链接和多链接分卷。
 
 
 #### 写法示范 A：当前还没有 `1.0.1`（无增量补丁）
@@ -98,15 +104,6 @@
 > - 建议按版本从低到高维护补丁（`1.0.1 -> 1.0.2 -> 1.0.3`）。
 > - 客户端当前版本为 `1.0.0` 时，会依次下载并应用三个补丁；
 >   当前版本为 `1.0.2` 时，只会应用 `1.0.3`。
-
-### 3) `launcher-state.json`
-```json
-{
-  "currentVersion": "1.0.0"
-}
-```
-
-记录当前本地版本，更新成功后自动写入。
 
 ## 使用说明
 1. 安装并确保 `aria2c` 可执行（或在 `launcher-config.json` 填绝对路径）。

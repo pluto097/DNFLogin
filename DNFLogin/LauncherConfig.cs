@@ -27,6 +27,7 @@ internal sealed class LauncherConfig
     public required string BaseResourceCheckFile { get; init; }
     public required string UpdateManifestUrl { get; init; }
     public required string SevenZipPath { get; init; }
+    public string CurrentVersion { get; set; } = "0.0.0";
 
     public static LauncherConfig LoadOrCreate(string baseDirectory)
     {
@@ -39,7 +40,8 @@ internal sealed class LauncherConfig
                 GameExePath = "DNF.exe",
                 BaseResourceCheckFile = "Script.pvf",
                 UpdateManifestUrl = DefaultUpdateManifestUrl,
-                SevenZipPath = "7z"
+                SevenZipPath = "7z",
+                CurrentVersion = "0.0.0"
             };
 
             File.WriteAllText(configPath, JsonSerializer.Serialize(defaultConfig, JsonOptions));
@@ -51,14 +53,24 @@ internal sealed class LauncherConfig
             ?? throw new InvalidOperationException("无法解析 launcher-config.json");
 
         var shouldSaveMigratedConfig = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl)
-            || string.IsNullOrWhiteSpace(rawConfig.SevenZipPath);
+            || string.IsNullOrWhiteSpace(rawConfig.SevenZipPath)
+            || string.IsNullOrWhiteSpace(rawConfig.CurrentVersion);
+
+        var migratedCurrentVersion = rawConfig.CurrentVersion;
+        if (string.IsNullOrWhiteSpace(migratedCurrentVersion))
+        {
+            migratedCurrentVersion = LoadLegacyCurrentVersion(baseDirectory);
+            shouldSaveMigratedConfig = true;
+        }
+
         var config = new LauncherConfig
         {
             Aria2Path = rawConfig.Aria2Path ?? string.Empty,
             GameExePath = rawConfig.GameExePath ?? string.Empty,
             BaseResourceCheckFile = rawConfig.BaseResourceCheckFile ?? "Script.pvf",
             UpdateManifestUrl = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl) ? DefaultUpdateManifestUrl : rawConfig.UpdateManifestUrl!,
-            SevenZipPath = string.IsNullOrWhiteSpace(rawConfig.SevenZipPath) ? "7z" : rawConfig.SevenZipPath!
+            SevenZipPath = string.IsNullOrWhiteSpace(rawConfig.SevenZipPath) ? "7z" : rawConfig.SevenZipPath!,
+            CurrentVersion = string.IsNullOrWhiteSpace(migratedCurrentVersion) ? "0.0.0" : migratedCurrentVersion!
         };
 
         if (string.IsNullOrWhiteSpace(config.Aria2Path)
@@ -72,11 +84,7 @@ internal sealed class LauncherConfig
         if (shouldSaveMigratedConfig)
         {
             File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
-        }
-
-        if (shouldSaveMigratedConfig)
-        {
-            File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
+            TryDeleteLegacyStateFile(baseDirectory);
         }
 
         return config;
@@ -101,31 +109,17 @@ internal sealed class LauncherConfig
         return manifest;
     }
 
-    public static LauncherState LoadOrCreateState(string baseDirectory)
+    public static void SaveConfig(string baseDirectory, LauncherConfig config)
     {
-        var path = Path.Combine(baseDirectory, StateFileName);
-        if (!File.Exists(path))
-        {
-            var state = new LauncherState { CurrentVersion = "0.0.0" };
-            SaveState(baseDirectory, state);
-            return state;
-        }
-
-        var content = File.ReadAllText(path);
-        return JsonSerializer.Deserialize<LauncherState>(content, JsonOptions)
-               ?? new LauncherState { CurrentVersion = "0.0.0" };
-    }
-
-    public static void SaveState(string baseDirectory, LauncherState state)
-    {
-        var path = Path.Combine(baseDirectory, StateFileName);
-        File.WriteAllText(path, JsonSerializer.Serialize(state, JsonOptions));
+        var configPath = Path.Combine(baseDirectory, ConfigFileName);
+        File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
     }
 
     public static IReadOnlyList<UpdatePackage> ResolvePendingUpdates(UpdateManifest manifest, string currentVersion)
     {
         return manifest.IncrementalUpdates
-            .Where(x => !string.IsNullOrWhiteSpace(x.DownloadUrl) && CompareVersions(x.Version, currentVersion) > 0)
+            .Where(x => (x.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url)) || !string.IsNullOrWhiteSpace(x.DownloadUrl))
+                && CompareVersions(x.Version, currentVersion) > 0)
             .OrderBy(x => x.Version, VersionComparer.Instance)
             .ToList();
     }
@@ -154,6 +148,29 @@ internal sealed class LauncherConfig
         public string? BaseResourceCheckFile { get; init; }
         public string? UpdateManifestUrl { get; init; }
         public string? SevenZipPath { get; init; }
+        public string? CurrentVersion { get; init; }
+    }
+
+    private static string LoadLegacyCurrentVersion(string baseDirectory)
+    {
+        var path = Path.Combine(baseDirectory, StateFileName);
+        if (!File.Exists(path))
+        {
+            return "0.0.0";
+        }
+
+        var content = File.ReadAllText(path);
+        var state = JsonSerializer.Deserialize<LauncherState>(content, JsonOptions);
+        return string.IsNullOrWhiteSpace(state?.CurrentVersion) ? "0.0.0" : state.CurrentVersion;
+    }
+
+    private static void TryDeleteLegacyStateFile(string baseDirectory)
+    {
+        var path = Path.Combine(baseDirectory, StateFileName);
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
     }
 }
 
@@ -173,6 +190,9 @@ internal sealed class UpdatePackage
 
     [JsonPropertyName("downloadUrl")]
     public string DownloadUrl { get; set; } = string.Empty;
+
+    [JsonPropertyName("downloadUrls")]
+    public List<string> DownloadUrls { get; set; } = [];
 
     [JsonPropertyName("description")]
     public string Description { get; set; } = string.Empty;
