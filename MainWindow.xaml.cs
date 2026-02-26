@@ -216,7 +216,7 @@ namespace DNFLogin
             var startInfo = new ProcessStartInfo
             {
                 FileName = aria2Path,
-                Arguments = $"--allow-overwrite=true --auto-file-renaming=false --summary-interval=1 --console-log-level=notice --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"",
+                Arguments = $"--allow-overwrite=true --auto-file-renaming=false --summary-interval=1 --console-log-level=notice -x 8 -s 8 --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"",
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
