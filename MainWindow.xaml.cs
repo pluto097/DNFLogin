@@ -171,10 +171,12 @@ namespace DNFLogin
                 return;
             }
 
-            if (manifest.FullPackage is null || string.IsNullOrWhiteSpace(manifest.FullPackage.DownloadUrl))
+            if (manifest.FullPackage is null)
             {
                 throw new InvalidOperationException("缺少基础资源且 update-manifest.json 未配置 fullPackage.downloadUrl");
             }
+            // 验证是否至少有一个下载地址
+            _ = GetDownloadUrls(manifest.FullPackage);
 
             await DownloadAndExtractByAria2Async(config, manifest.FullPackage, "完整资源包", stageStart, stageSpan)
                 .ConfigureAwait(false);
