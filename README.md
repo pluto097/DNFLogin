@@ -213,13 +213,15 @@ git clone https://github.com/<your-username>/DNFLogin.git
 cd DNFLogin
 ```
 
-2. 发布为单文件可执行程序：
+2. 本仓库包含aria2和7z，请自行下载`aria2c.exe`和`7za.exe`放入仓库根目录。
+
+3. 发布为单文件可执行程序：
 
 ```bash
 dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
 ```
 
-3. 产物位于：
+4. 产物位于：
 
 ```
 bin\Release\net10.0-windows7.0\win-x64\publish\DNFLogin.exe
