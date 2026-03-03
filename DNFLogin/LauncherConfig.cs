@@ -22,11 +22,9 @@ internal sealed class LauncherConfig
         WriteIndented = true
     };
 
-    public required string Aria2Path { get; init; }
     public required string GameExePath { get; init; }
     public required string BaseResourceCheckFile { get; init; }
     public required string UpdateManifestUrl { get; init; }
-    public required string SevenZipPath { get; init; }
     public string CurrentVersion { get; set; } = "0.0.0";
 
     public static LauncherConfig LoadOrCreate(string baseDirectory)
@@ -36,11 +34,9 @@ internal sealed class LauncherConfig
         {
             var defaultConfig = new LauncherConfig
             {
-                Aria2Path = "aria2c",
                 GameExePath = "DNF.exe",
                 BaseResourceCheckFile = "Script.pvf",
                 UpdateManifestUrl = DefaultUpdateManifestUrl,
-                SevenZipPath = "7z",
                 CurrentVersion = "0.0.0"
             };
 
@@ -53,7 +49,6 @@ internal sealed class LauncherConfig
             ?? throw new InvalidOperationException("无法解析 launcher-config.json");
 
         var shouldSaveMigratedConfig = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl)
-            || string.IsNullOrWhiteSpace(rawConfig.SevenZipPath)
             || string.IsNullOrWhiteSpace(rawConfig.CurrentVersion);
 
         var migratedCurrentVersion = rawConfig.CurrentVersion;
@@ -65,20 +60,16 @@ internal sealed class LauncherConfig
 
         var config = new LauncherConfig
         {
-            Aria2Path = rawConfig.Aria2Path ?? string.Empty,
             GameExePath = rawConfig.GameExePath ?? string.Empty,
             BaseResourceCheckFile = rawConfig.BaseResourceCheckFile ?? "Script.pvf",
             UpdateManifestUrl = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl) ? DefaultUpdateManifestUrl : rawConfig.UpdateManifestUrl!,
-            SevenZipPath = string.IsNullOrWhiteSpace(rawConfig.SevenZipPath) ? "7z" : rawConfig.SevenZipPath!,
             CurrentVersion = string.IsNullOrWhiteSpace(migratedCurrentVersion) ? "0.0.0" : migratedCurrentVersion!
         };
 
-        if (string.IsNullOrWhiteSpace(config.Aria2Path)
-            || string.IsNullOrWhiteSpace(config.GameExePath)
-            || string.IsNullOrWhiteSpace(config.UpdateManifestUrl)
-            || string.IsNullOrWhiteSpace(config.SevenZipPath))
+        if (string.IsNullOrWhiteSpace(config.GameExePath)
+            || string.IsNullOrWhiteSpace(config.UpdateManifestUrl))
         {
-            throw new InvalidOperationException("launcher-config.json 缺少必要字段: aria2Path、gameExePath、updateManifestUrl 或 sevenZipPath");
+            throw new InvalidOperationException("launcher-config.json 缺少必要字段: gameExePath 或 updateManifestUrl");
         }
 
         if (shouldSaveMigratedConfig)
@@ -118,10 +109,27 @@ internal sealed class LauncherConfig
     public static IReadOnlyList<UpdatePackage> ResolvePendingUpdates(UpdateManifest manifest, string currentVersion)
     {
         return manifest.IncrementalUpdates
-            .Where(x => (x.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url)) || !string.IsNullOrWhiteSpace(x.DownloadUrl))
+            .Where(x => HasAnyDownloadSource(x)
                 && CompareVersions(x.Version, currentVersion) > 0)
             .OrderBy(x => x.Version, VersionComparer.Instance)
             .ToList();
+    }
+
+    private static bool HasAnyDownloadSource(UpdatePackage package)
+    {
+        if (package.DownloadRoutes.Any(r =>
+            r.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url))
+            || !string.IsNullOrWhiteSpace(r.DownloadUrl)))
+        {
+            return true;
+        }
+
+        if (package.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url)))
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(package.DownloadUrl);
     }
 
     private static int CompareVersions(string? left, string? right)
@@ -143,11 +151,9 @@ internal sealed class LauncherConfig
 
     private sealed class LauncherConfigData
     {
-        public string? Aria2Path { get; init; }
         public string? GameExePath { get; init; }
         public string? BaseResourceCheckFile { get; init; }
         public string? UpdateManifestUrl { get; init; }
-        public string? SevenZipPath { get; init; }
         public string? CurrentVersion { get; init; }
     }
 
@@ -194,8 +200,23 @@ internal sealed class UpdatePackage
     [JsonPropertyName("downloadUrls")]
     public List<string> DownloadUrls { get; set; } = [];
 
+    [JsonPropertyName("downloadRoutes")]
+    public List<DownloadRoute> DownloadRoutes { get; set; } = [];
+
     [JsonPropertyName("description")]
     public string Description { get; set; } = string.Empty;
+}
+
+internal sealed class DownloadRoute
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("downloadUrl")]
+    public string DownloadUrl { get; set; } = string.Empty;
+
+    [JsonPropertyName("downloadUrls")]
+    public List<string> DownloadUrls { get; set; } = [];
 }
 
 internal sealed class LauncherState

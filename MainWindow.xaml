@@ -55,6 +55,12 @@
                            FontSize="12"
                            TextWrapping="Wrap"
                            Margin="0,4,0,0" />
+                <TextBlock x:Name="RouteInfoText"
+                           Text=""
+                           Foreground="#99FFFFFF"
+                           FontSize="11"
+                           Margin="0,2,0,0"
+                           Visibility="Collapsed" />
 
                 <StackPanel Margin="0,12,0,0">
                     <Grid>

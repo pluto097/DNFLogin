@@ -1,9 +1,13 @@
 ﻿using AduSkin.Controls.Metro;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
@@ -23,6 +27,10 @@ namespace DNFLogin
         private double _globalProgress;
         private bool _updateStarted;
         private ImageBrush? _backgroundBrush;
+        private Process? _currentAria2Process;
+        private bool _isAutoClosing;
+        private string _aria2Path = null!;
+        private string _sevenZipPath = null!;
 
         public MainWindow()
         {
@@ -52,7 +60,64 @@ namespace DNFLogin
 
         protected override void OnClosing(CancelEventArgs e)
         {
+            if (!_isAutoClosing)
+            {
+                var aria2 = _currentAria2Process;
+                var isDownloading = false;
+                try { isDownloading = aria2 is not null && !aria2.HasExited; } catch { }
+
+                if (isDownloading)
+                {
+                    var result = MessageBox.Show(
+                        "正在下载更新，关闭程序将中止下载。\n确定要退出吗？",
+                        "退出确认",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (result != MessageBoxResult.Yes)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+                }
+            }
+
+            KillAria2Process();
             base.OnClosing(e);
+        }
+
+        private void KillAria2Process()
+        {
+            try
+            {
+                var process = _currentAria2Process;
+                if (process is not null && !process.HasExited)
+                {
+                    process.Kill();
+                }
+            }
+            catch
+            {
+                // 进程可能已退出或已释放
+            }
+        }
+
+        private static string ExtractEmbeddedTool(string resourceName, string outputDir)
+        {
+            var outputPath = Path.Combine(outputDir, resourceName);
+            if (File.Exists(outputPath))
+            {
+                return outputPath;
+            }
+
+            Directory.CreateDirectory(outputDir);
+
+            using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName)
+                ?? throw new InvalidOperationException($"未找到嵌入资源: {resourceName}");
+            using var fs = File.Create(outputPath);
+            stream.CopyTo(fs);
+
+            return outputPath;
         }
 
         private void RootContainer_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -120,6 +185,11 @@ namespace DNFLogin
             try
             {
                 ReportProgress("正在初始化", "读取本地配置并请求云端更新配置", 5, 5);
+
+                var toolsDir = Path.Combine(_baseDirectory, ".tools");
+                _aria2Path = ExtractEmbeddedTool("aria2c.exe", toolsDir);
+                _sevenZipPath = ExtractEmbeddedTool("7za.exe", toolsDir);
+
                 var config = LauncherConfig.LoadOrCreate(_baseDirectory);
                 var manifest = await LauncherConfig.LoadManifestFromRemoteAsync(config).ConfigureAwait(false);
 
@@ -175,8 +245,8 @@ namespace DNFLogin
             {
                 throw new InvalidOperationException("缺少基础资源且 update-manifest.json 未配置 fullPackage.downloadUrl");
             }
-            // 验证是否至少有一个下载地址
-            _ = GetDownloadUrls(manifest.FullPackage);
+            // 验证是否至少有一个下载线路
+            _ = ResolveDownloadRoutes(manifest.FullPackage);
 
             await DownloadAndExtractByAria2Async(config, manifest.FullPackage, "完整资源包", stageStart, stageSpan)
                 .ConfigureAwait(false);
@@ -188,52 +258,195 @@ namespace DNFLogin
 
         private async Task DownloadAndExtractByAria2Async(LauncherConfig config, UpdatePackage package, string displayName, double stageStart, double stageSpan)
         {
-            var downloadUrls = GetDownloadUrls(package);
-            var isMultiPart = downloadUrls.Count > 1;
-            var tempArchive = CreateLocalCacheFile(downloadUrls[0]);
-            try
-            {
-                ReportStageProgress($"准备下载{displayName}", package.Description, 0, stageStart, stageSpan);
-                await RunAria2DownloadAsync(config.Aria2Path, downloadUrls, tempArchive, (percent, detail) =>
-                {
-                    var normalized = Math.Clamp(percent * 0.85, 0, 85);
-                    var text = string.IsNullOrWhiteSpace(package.Description) ? detail : $"{detail}\n{package.Description}";
-                    ReportStageProgress($"正在下载{displayName}", text, normalized, stageStart, stageSpan);
-                }).ConfigureAwait(false);
+            var routes = ResolveDownloadRoutes(package);
+            Exception? lastException = null;
 
-                var extractName = isMultiPart ? $"{displayName}(分卷)" : displayName;
-                ReportStageProgress($"正在解压{displayName}", "正在使用 7z 验证并解压文件，请稍候", 90, stageStart, stageSpan);
-                EnsureValidArchiveFile(tempArchive, extractName, string.Join(",", downloadUrls));
-                await ExtractBySevenZipAsync(config.SevenZipPath, tempArchive, extractName, string.Join(",", downloadUrls)).ConfigureAwait(false);
-                ReportStageProgress($"完成{displayName}", $"已更新到版本 {package.Version}", 100, stageStart, stageSpan);
-            }
-            finally
+            for (var routeIdx = 0; routeIdx < routes.Count; routeIdx++)
             {
+                var route = routes[routeIdx];
+                var routeLabel = routes.Count > 1 ? $"[{route.Name}] " : "";
+                var downloadUrls = route.Urls;
+                var isMultiPart = downloadUrls.Count > 1;
+                var tempArchive = CreateLocalCacheFile(downloadUrls[0]);
+
+                UpdateRouteDisplay(route.Name, route.RouteIndex, route.TotalRoutes);
+
+                var extractionSucceeded = false;
                 try
                 {
-                    var cacheDirectory = Path.GetDirectoryName(tempArchive) ?? _baseDirectory;
-                    var firstPartFileName = Path.GetFileName(tempArchive);
-                    var firstPartExtension = Path.GetExtension(firstPartFileName);
-                    var filePrefix = firstPartFileName.EndsWith(firstPartExtension, StringComparison.OrdinalIgnoreCase)
-                        ? firstPartFileName[..^firstPartExtension.Length]
-                        : firstPartFileName;
-            
-                    var pattern = $"{filePrefix}.*";
-                    var files = Directory.GetFiles(cacheDirectory, pattern);
-            
-                    foreach (var file in files)
+                    ReportStageProgress($"准备下载{displayName}", $"{routeLabel}{package.Description}", 0, stageStart, stageSpan);
+                    await RunAria2DownloadAsync(_aria2Path, downloadUrls, tempArchive, (percent, detail) =>
                     {
-                        File.Delete(file);
+                        var normalized = Math.Clamp(percent * 0.85, 0, 85);
+                        var text = string.IsNullOrWhiteSpace(package.Description)
+                            ? $"{routeLabel}{detail}"
+                            : $"{routeLabel}{detail}\n{package.Description}";
+                        ReportStageProgress($"正在下载{displayName}", text, normalized, stageStart, stageSpan);
+                    }).ConfigureAwait(false);
+
+                    var extractName = isMultiPart ? $"{displayName}(分卷)" : displayName;
+                    ReportStageProgress($"正在解压{displayName}", $"{routeLabel}正在使用 7z 验证并解压文件，请稍候", 90, stageStart, stageSpan);
+                    EnsureValidArchiveFile(tempArchive, extractName, string.Join(",", downloadUrls));
+                    await ExtractBySevenZipAsync(_sevenZipPath, tempArchive, extractName, string.Join(",", downloadUrls)).ConfigureAwait(false);
+                    ReportStageProgress($"完成{displayName}", $"已更新到版本 {package.Version}", 100, stageStart, stageSpan);
+                    extractionSucceeded = true;
+                    return; // 下载解压成功，直接返回
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+
+                    if (routeIdx < routes.Count - 1)
+                    {
+                        // 仅在切换线路时清理缓存（不同线路 URL 不同，不能交叉续传）
+                        CleanupPartialDownload(tempArchive);
+
+                        var nextRoute = routes[routeIdx + 1];
+                        ReportStageProgress(
+                            $"{route.Name} 下载失败",
+                            $"正在切换到 {nextRoute.Name}...\n失败原因: {ex.Message}",
+                            0, stageStart, stageSpan);
+                        await Task.Delay(1500).ConfigureAwait(false);
+                    }
+                    // 最后一条线路失败时不清理，保留 .aria2 控制文件以支持断点续传
+                }
+                finally
+                {
+                    if (extractionSucceeded)
+                    {
+                        CleanupCompletedDownload(tempArchive);
                     }
                 }
-                catch
+            }
+
+            // 所有线路均失败
+            UpdateRouteDisplay(null, 0, 0);
+            throw new InvalidOperationException(
+                $"{displayName} 所有下载线路均失败: {lastException?.Message}", lastException);
+        }
+
+        private void CleanupPartialDownload(string tempArchive)
+        {
+            try
+            {
+                // 删除 .aria2 控制文件和部分下载的文件
+                var aria2File = tempArchive + ".aria2";
+                if (File.Exists(aria2File)) File.Delete(aria2File);
+                if (File.Exists(tempArchive)) File.Delete(tempArchive);
+
+                // 清理可能的分卷文件
+                var cacheDirectory = Path.GetDirectoryName(tempArchive) ?? _baseDirectory;
+                var firstPartFileName = Path.GetFileName(tempArchive);
+                var firstPartExtension = Path.GetExtension(firstPartFileName);
+                var filePrefix = firstPartFileName.EndsWith(firstPartExtension, StringComparison.OrdinalIgnoreCase)
+                    ? firstPartFileName[..^firstPartExtension.Length]
+                    : firstPartFileName;
+
+                foreach (var file in Directory.GetFiles(cacheDirectory, $"{filePrefix}.*"))
                 {
-                    // 清理失败忽略
+                    File.Delete(file);
                 }
+            }
+            catch
+            {
+                // 清理失败忽略
             }
         }
 
-        private static IReadOnlyList<string> GetDownloadUrls(UpdatePackage package)
+        private void CleanupCompletedDownload(string tempArchive)
+        {
+            try
+            {
+                var cacheDirectory = Path.GetDirectoryName(tempArchive) ?? _baseDirectory;
+                var firstPartFileName = Path.GetFileName(tempArchive);
+                var firstPartExtension = Path.GetExtension(firstPartFileName);
+                var filePrefix = firstPartFileName.EndsWith(firstPartExtension, StringComparison.OrdinalIgnoreCase)
+                    ? firstPartFileName[..^firstPartExtension.Length]
+                    : firstPartFileName;
+
+                var pattern = $"{filePrefix}.*";
+                var files = Directory.GetFiles(cacheDirectory, pattern);
+
+                foreach (var file in files)
+                {
+                    File.Delete(file);
+                }
+            }
+            catch
+            {
+                // 清理失败忽略
+            }
+        }
+
+        private sealed record ResolvedRoute(string Name, IReadOnlyList<string> Urls, int RouteIndex, int TotalRoutes);
+
+        private static IReadOnlyList<ResolvedRoute> ResolveDownloadRoutes(UpdatePackage package)
+        {
+            var routes = new List<ResolvedRoute>();
+
+            // 优先从 downloadRoutes 中解析多条线路
+            if (package.DownloadRoutes.Count > 0)
+            {
+                foreach (var route in package.DownloadRoutes)
+                {
+                    var urls = GetUrlsFromRoute(route);
+                    if (urls.Count > 0)
+                    {
+                        routes.Add(new ResolvedRoute(
+                            string.IsNullOrWhiteSpace(route.Name) ? $"线路{routes.Count + 1}" : route.Name,
+                            urls,
+                            routes.Count + 1,
+                            0)); // TotalRoutes 稍后回填
+                    }
+                }
+            }
+
+            // 兼容旧格式：将顶层 downloadUrls / downloadUrl 作为备用线路
+            if (routes.Count == 0)
+            {
+                var legacyUrls = GetLegacyUrls(package);
+                if (legacyUrls.Count > 0)
+                {
+                    routes.Add(new ResolvedRoute("默认线路", legacyUrls, 1, 1));
+                    return routes;
+                }
+            }
+
+            if (routes.Count == 0)
+            {
+                throw new InvalidOperationException($"版本 {package.Version} 未配置下载地址");
+            }
+
+            // 回填 TotalRoutes
+            var total = routes.Count;
+            for (var i = 0; i < routes.Count; i++)
+            {
+                routes[i] = routes[i] with { TotalRoutes = total };
+            }
+
+            return routes;
+        }
+
+        private static IReadOnlyList<string> GetUrlsFromRoute(DownloadRoute route)
+        {
+            if (route.DownloadUrls.Count > 0)
+            {
+                var urls = route.DownloadUrls.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+                if (urls.Count > 0)
+                {
+                    return urls;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(route.DownloadUrl))
+            {
+                return [route.DownloadUrl];
+            }
+
+            return [];
+        }
+
+        private static IReadOnlyList<string> GetLegacyUrls(UpdatePackage package)
         {
             if (package.DownloadUrls.Count > 0)
             {
@@ -249,7 +462,7 @@ namespace DNFLogin
                 return [package.DownloadUrl];
             }
 
-            throw new InvalidOperationException($"版本 {package.Version} 未配置下载地址");
+            return [];
         }
 
         private async Task RunAria2DownloadAsync(string aria2Path, IReadOnlyList<string> urls, string outputFile, Action<double, string> onProgress)
@@ -284,10 +497,16 @@ namespace DNFLogin
 
         private async Task DownloadSingleFileByAria2Async(string aria2Path, string url, string outputFile, Action<double, string> onProgress)
         {
+            if (File.Exists(outputFile) && !File.Exists(outputFile + ".aria2"))
+            {
+                onProgress(100, "使用已下载的缓存文件");
+                return;
+            }
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = aria2Path,
-                Arguments = $"--allow-overwrite=true --auto-file-renaming=false --summary-interval=1 --console-log-level=notice -x 8 -s 8 --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"",
+                Arguments = $"--continue=true --auto-file-renaming=false --auto-save-interval=3 --summary-interval=1 --console-log-level=notice -x 16 -s 16 --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"",
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
@@ -296,33 +515,42 @@ namespace DNFLogin
             };
 
             using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-            process.Start();
+            _currentAria2Process = process;
 
-            var progressRegex = new Regex(@"\((\d+)%\)", RegexOptions.Compiled);
-
-            while (!process.HasExited)
+            try
             {
-                var line = await process.StandardOutput.ReadLineAsync().ConfigureAwait(false);
-                if (line is null)
+                process.Start();
+
+                var progressRegex = new Regex(@"\((\d+)%\)", RegexOptions.Compiled);
+
+                while (!process.HasExited)
                 {
-                    await Task.Delay(100).ConfigureAwait(false);
-                    continue;
+                    var line = await process.StandardOutput.ReadLineAsync().ConfigureAwait(false);
+                    if (line is null)
+                    {
+                        await Task.Delay(100).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    var match = progressRegex.Match(line);
+                    if (match.Success && double.TryParse(match.Groups[1].Value, out var value))
+                    {
+                        onProgress(value, LocalizeAria2Line(line.Trim()));
+                    }
                 }
 
-                var match = progressRegex.Match(line);
-                if (match.Success && double.TryParse(match.Groups[1].Value, out var value))
+                var stderr = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
+                if (process.ExitCode != 0)
                 {
-                    onProgress(value, LocalizeAria2Line(line.Trim()));
+                    throw new InvalidOperationException($"aria2 下载失败，退出码 {process.ExitCode}: {stderr}");
                 }
-            }
 
-            var stderr = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
-            if (process.ExitCode != 0)
+                onProgress(100, "下载完成");
+            }
+            finally
             {
-                throw new InvalidOperationException($"aria2 下载失败，退出码 {process.ExitCode}: {stderr}");
+                _currentAria2Process = null;
             }
-
-            onProgress(100, "下载完成");
         }
 
         private static string LocalizeAria2Line(string line)
@@ -343,7 +571,8 @@ namespace DNFLogin
             Directory.CreateDirectory(cacheDirectory);
 
             var extension = GetArchiveExtension(downloadUrl);
-            return Path.Combine(cacheDirectory, $"update-{Guid.NewGuid():N}{extension}");
+            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(downloadUrl)))[..16];
+            return Path.Combine(cacheDirectory, $"update-{hash}{extension}");
         }
 
         private static string GetArchiveExtension(string downloadUrl)
@@ -417,11 +646,13 @@ namespace DNFLogin
                 UseShellExecute = true
             });
 
+            _isAutoClosing = true;
             Dispatcher.Invoke(Close);
         }
 
         private void ReportProgress(string title, string detail, double? stepPercent = null, double? globalPercent = null)
         {
+            if (Dispatcher.HasShutdownStarted) return;
             Dispatcher.Invoke(() =>
             {
                 StepTitleText.Text = title;
@@ -448,6 +679,24 @@ namespace DNFLogin
             var normalizedStep = Math.Clamp(stepPercent, 0, 100);
             var global = stageStart + (stageSpan * (normalizedStep / 100d));
             ReportProgress(title, detail, normalizedStep, global);
+        }
+
+        private void UpdateRouteDisplay(string? routeName, int routeIndex, int totalRoutes)
+        {
+            if (Dispatcher.HasShutdownStarted) return;
+            Dispatcher.Invoke(() =>
+            {
+                if (routeName is null || totalRoutes <= 1)
+                {
+                    RouteInfoText.Visibility = Visibility.Collapsed;
+                    RouteInfoText.Text = string.Empty;
+                }
+                else
+                {
+                    RouteInfoText.Visibility = Visibility.Visible;
+                    RouteInfoText.Text = $"当前下载线路: {routeName} ({routeIndex}/{totalRoutes})";
+                }
+            });
         }
     }
 }

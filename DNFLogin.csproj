@@ -37,5 +37,13 @@
     <Resource Include="Assets\DNF.ico" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="7za.exe">
+      <LogicalName>7za.exe</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="aria2c.exe">
+      <LogicalName>aria2c.exe</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
 
 </Project>
