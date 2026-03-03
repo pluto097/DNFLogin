@@ -553,17 +553,7 @@ namespace DNFLogin
             }
         }
 
-        private static string LocalizeAria2Line(string line)
-        {
-            return line
-                .Replace("GiB", "GB", StringComparison.Ordinal)
-                .Replace("MiB", "MB", StringComparison.Ordinal)
-                .Replace("KiB", "KB", StringComparison.Ordinal)
-                .Replace("CN:", "线程:", StringComparison.Ordinal)
-                .Replace("DL:", "下载速度:", StringComparison.Ordinal)
-                .Replace("ETA:", "剩余时间:", StringComparison.Ordinal)
-                .Replace("MB/s", "MB/s", StringComparison.Ordinal);
-        }
+        private static string LocalizeAria2Line(string line) => line;
 
         private static string CreateLocalCacheFile(string downloadUrl)
         {
