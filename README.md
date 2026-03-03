@@ -213,7 +213,7 @@ git clone https://github.com/<your-username>/DNFLogin.git
 cd DNFLogin
 ```
 
-2. 本仓库包含aria2和7z，请自行下载`aria2c.exe`和`7za.exe`放入仓库根目录。
+2. 本仓库不包含aria2和7z，请自行下载`aria2c.exe`和`7za.exe`放入DNFLogin文件夹根目录。
 
 3. 发布为单文件可执行程序：
 
