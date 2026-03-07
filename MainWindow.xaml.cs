@@ -29,14 +29,19 @@ namespace DNFLogin
         private ImageBrush? _backgroundBrush;
         private Process? _currentAria2Process;
         private bool _isAutoClosing;
+        private volatile bool _isUserCancelling;
         private string _aria2Path = null!;
         private string _sevenZipPath = null!;
+
+        // 【下载速度异常判定阈值】当下载速度≤2MB/s且持续时间≥30秒时，判定为当前线路异常，自动切换到下一条线路
+        private const double SlowSpeedThresholdMiBps = 2.0; // 速度阈值：2MiB/s（约2MB/s）
+        private const int SlowSpeedDurationSeconds = 30;     // 持续时间阈值：30秒
 
         public MainWindow()
         {
             InitializeComponent();
             _baseDirectory = AppContext.BaseDirectory;
-            Title = "DOF 下载与更新器";
+            Title = "Dungeon & Fighter Launcher";
             SetDefaultBackground();
         }
 
@@ -82,6 +87,7 @@ namespace DNFLogin
                 }
             }
 
+            _isUserCancelling = true;
             KillAria2Process();
             base.OnClosing(e);
         }
@@ -274,8 +280,11 @@ namespace DNFLogin
                 var extractionSucceeded = false;
                 try
                 {
+                    // 【多级切换逻辑】判断是否为最后一条线路，最后一条线路不触发速度异常切换
+                    var isLastRoute = routeIdx >= routes.Count - 1;
+
                     ReportStageProgress($"准备下载{displayName}", $"{routeLabel}{package.Description}", 0, stageStart, stageSpan);
-                    await RunAria2DownloadAsync(_aria2Path, downloadUrls, tempArchive, (percent, detail) =>
+                    await RunAria2DownloadAsync(_aria2Path, downloadUrls, tempArchive, route.IsApiRoute, isLastRoute, (percent, detail) =>
                     {
                         var normalized = Math.Clamp(percent * 0.85, 0, 85);
                         var text = string.IsNullOrWhiteSpace(package.Description)
@@ -296,15 +305,25 @@ namespace DNFLogin
                 {
                     lastException = ex;
 
+                    // 用户正在关闭程序，保留缓存文件以支持下次启动时断点续传
+                    if (_isUserCancelling)
+                    {
+                        break;
+                    }
+
                     if (routeIdx < routes.Count - 1)
                     {
                         // 仅在切换线路时清理缓存（不同线路 URL 不同，不能交叉续传）
                         CleanupPartialDownload(tempArchive);
 
                         var nextRoute = routes[routeIdx + 1];
+                        // 根据异常类型显示不同的切换原因：速度过慢或下载失败
+                        var switchTitle = ex is SlowSpeedSwitchException
+                            ? $"{route.Name} 速度过慢"
+                            : $"{route.Name} 下载失败";
                         ReportStageProgress(
-                            $"{route.Name} 下载失败",
-                            $"正在切换到 {nextRoute.Name}...\n失败原因: {ex.Message}",
+                            switchTitle,
+                            $"正在切换到 {nextRoute.Name}...\n原因: {ex.Message}",
                             0, stageStart, stageSpan);
                         await Task.Delay(1500).ConfigureAwait(false);
                     }
@@ -378,7 +397,7 @@ namespace DNFLogin
             }
         }
 
-        private sealed record ResolvedRoute(string Name, IReadOnlyList<string> Urls, int RouteIndex, int TotalRoutes);
+        private sealed record ResolvedRoute(string Name, IReadOnlyList<string> Urls, int RouteIndex, int TotalRoutes, bool IsApiRoute);
 
         private static IReadOnlyList<ResolvedRoute> ResolveDownloadRoutes(UpdatePackage package)
         {
@@ -389,25 +408,26 @@ namespace DNFLogin
             {
                 foreach (var route in package.DownloadRoutes)
                 {
-                    var urls = GetUrlsFromRoute(route);
+                    var (urls, isApiRoute) = GetUrlsFromRoute(route);
                     if (urls.Count > 0)
                     {
                         routes.Add(new ResolvedRoute(
                             string.IsNullOrWhiteSpace(route.Name) ? $"线路{routes.Count + 1}" : route.Name,
                             urls,
                             routes.Count + 1,
-                            0)); // TotalRoutes 稍后回填
+                            0, // TotalRoutes 稍后回填
+                            isApiRoute));
                     }
                 }
             }
 
-            // 兼容旧格式：将顶层 downloadUrls / downloadUrl 作为备用线路
+            // 兼容旧格式：将顶层 downloadUrls / downloadUrl / apiDownloadUrl 作为备用线路
             if (routes.Count == 0)
             {
-                var legacyUrls = GetLegacyUrls(package);
+                var (legacyUrls, isApiRoute) = GetLegacyUrls(package);
                 if (legacyUrls.Count > 0)
                 {
-                    routes.Add(new ResolvedRoute("默认线路", legacyUrls, 1, 1));
+                    routes.Add(new ResolvedRoute("默认线路", legacyUrls, 1, 1, isApiRoute));
                     return routes;
                 }
             }
@@ -427,49 +447,59 @@ namespace DNFLogin
             return routes;
         }
 
-        private static IReadOnlyList<string> GetUrlsFromRoute(DownloadRoute route)
+        private static (IReadOnlyList<string> Urls, bool IsApiRoute) GetUrlsFromRoute(DownloadRoute route)
         {
             if (route.DownloadUrls.Count > 0)
             {
                 var urls = route.DownloadUrls.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
                 if (urls.Count > 0)
                 {
-                    return urls;
+                    return (urls, false);
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(route.DownloadUrl))
             {
-                return [route.DownloadUrl];
+                return ([route.DownloadUrl], false);
             }
 
-            return [];
+            if (!string.IsNullOrWhiteSpace(route.ApiDownloadUrl))
+            {
+                return ([route.ApiDownloadUrl], true);
+            }
+
+            return ([], false);
         }
 
-        private static IReadOnlyList<string> GetLegacyUrls(UpdatePackage package)
+        private static (IReadOnlyList<string> Urls, bool IsApiRoute) GetLegacyUrls(UpdatePackage package)
         {
             if (package.DownloadUrls.Count > 0)
             {
                 var urls = package.DownloadUrls.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
                 if (urls.Count > 0)
                 {
-                    return urls;
+                    return (urls, false);
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(package.DownloadUrl))
             {
-                return [package.DownloadUrl];
+                return ([package.DownloadUrl], false);
             }
 
-            return [];
+            if (!string.IsNullOrWhiteSpace(package.ApiDownloadUrl))
+            {
+                return ([package.ApiDownloadUrl], true);
+            }
+
+            return ([], false);
         }
 
-        private async Task RunAria2DownloadAsync(string aria2Path, IReadOnlyList<string> urls, string outputFile, Action<double, string> onProgress)
+        private async Task RunAria2DownloadAsync(string aria2Path, IReadOnlyList<string> urls, string outputFile, bool isApiRoute, bool isLastRoute, Action<double, string> onProgress)
         {
             if (urls.Count == 1)
             {
-                await DownloadSingleFileByAria2Async(aria2Path, urls[0], outputFile, onProgress).ConfigureAwait(false);
+                await DownloadSingleFileByAria2Async(aria2Path, urls[0], outputFile, isApiRoute, isLastRoute, onProgress).ConfigureAwait(false);
                 return;
             }
 
@@ -484,7 +514,7 @@ namespace DNFLogin
             {
                 var partFile = i == 0 ? outputFile : Path.Combine(cacheDirectory, $"{filePrefix}.{i + 1:D3}");
                 var partTitle = $"分卷 {i + 1}/{urls.Count}";
-                await DownloadSingleFileByAria2Async(aria2Path, urls[i], partFile, (partPercent, detail) =>
+                await DownloadSingleFileByAria2Async(aria2Path, urls[i], partFile, isApiRoute, isLastRoute, (partPercent, detail) =>
                 {
                     var totalPercent = ((i + (partPercent / 100d)) / urls.Count) * 100d;
                     var detailWithPart = $"{partTitle} | {detail}";
@@ -495,7 +525,7 @@ namespace DNFLogin
             onProgress(100, "下载完成");
         }
 
-        private async Task DownloadSingleFileByAria2Async(string aria2Path, string url, string outputFile, Action<double, string> onProgress)
+        private async Task DownloadSingleFileByAria2Async(string aria2Path, string url, string outputFile, bool isApiRoute, bool isLastRoute, Action<double, string> onProgress)
         {
             if (File.Exists(outputFile) && !File.Exists(outputFile + ".aria2"))
             {
@@ -503,10 +533,20 @@ namespace DNFLogin
                 return;
             }
 
+            var concurrency = isApiRoute ? "8" : "16";
+            var baseArgs = $"--continue=true --auto-file-renaming=false --auto-save-interval=3 --summary-interval=1 --console-log-level=notice -x {concurrency} -s {concurrency} --file-allocation=none --min-split-size=4M -k4M";
+
+            if (isApiRoute)
+            {
+                baseArgs += " --header=\"User-Agent: pan.baidu.com\" --header=\"Referer: https://pan.baidu.com/\"";
+            }
+
+            baseArgs += $" --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"";
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = aria2Path,
-                Arguments = $"--continue=true --auto-file-renaming=false --auto-save-interval=3 --summary-interval=1 --console-log-level=notice -x 16 -s 16 --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"",
+                Arguments = baseArgs,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
@@ -522,6 +562,10 @@ namespace DNFLogin
                 process.Start();
 
                 var progressRegex = new Regex(@"\((\d+)%\)", RegexOptions.Compiled);
+                // 用于解析aria2输出中的下载速度，如 DL:1.5MiB、DL:500KiB
+                var speedRegex = new Regex(@"DL:(\d+(?:\.\d+)?)(B|KiB|MiB|GiB)", RegexOptions.Compiled);
+                // 【速度异常判定】记录速度持续低于阈值的起始时间
+                DateTime? slowSpeedStartTime = null;
 
                 while (!process.HasExited)
                 {
@@ -536,6 +580,35 @@ namespace DNFLogin
                     if (match.Success && double.TryParse(match.Groups[1].Value, out var value))
                     {
                         onProgress(value, LocalizeAria2Line(line.Trim()));
+                    }
+
+                    // 【下载速度实时监控】当非最后一条线路时，监测速度是否持续低于阈值
+                    if (!isLastRoute)
+                    {
+                        var speedMatch = speedRegex.Match(line);
+                        if (speedMatch.Success && double.TryParse(speedMatch.Groups[1].Value, out var speedValue))
+                        {
+                            var speedMiBps = ConvertSpeedToMiBps(speedValue, speedMatch.Groups[2].Value);
+
+                            // 【异常速度判定】速度≤2MB/s时开始计时，速度恢复则重置计时
+                            if (speedMiBps <= SlowSpeedThresholdMiBps)
+                            {
+                                slowSpeedStartTime ??= DateTime.UtcNow;
+                                var elapsed = (DateTime.UtcNow - slowSpeedStartTime.Value).TotalSeconds;
+                                if (elapsed >= SlowSpeedDurationSeconds)
+                                {
+                                    // 【自动线路切换】速度持续过慢，终止当前aria2进程并切换到下一条线路
+                                    try { process.Kill(); } catch { }
+                                    throw new SlowSpeedSwitchException(
+                                        $"下载速度≤{SlowSpeedThresholdMiBps}MB/s 已持续 {elapsed:F0} 秒");
+                                }
+                            }
+                            else
+                            {
+                                // 速度恢复正常，重置慢速计时器
+                                slowSpeedStartTime = null;
+                            }
+                        }
                     }
                 }
 
@@ -687,6 +760,26 @@ namespace DNFLogin
                     RouteInfoText.Text = $"当前下载线路: {routeName} ({routeIndex}/{totalRoutes})";
                 }
             });
+        }
+
+        /// <summary>
+        /// 将aria2输出的速度值转换为MiB/s单位
+        /// </summary>
+        private static double ConvertSpeedToMiBps(double value, string unit) => unit switch
+        {
+            "GiB" => value * 1024,
+            "MiB" => value,
+            "KiB" => value / 1024,
+            "B" => value / (1024 * 1024),
+            _ => 0
+        };
+
+        /// <summary>
+        /// 下载速度过慢触发的线路切换异常
+        /// </summary>
+        private sealed class SlowSpeedSwitchException : Exception
+        {
+            public SlowSpeedSwitchException(string message) : base(message) { }
         }
     }
 }

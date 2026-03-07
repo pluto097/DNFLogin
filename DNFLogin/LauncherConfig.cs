@@ -119,12 +119,18 @@ internal sealed class LauncherConfig
     {
         if (package.DownloadRoutes.Any(r =>
             r.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url))
-            || !string.IsNullOrWhiteSpace(r.DownloadUrl)))
+            || !string.IsNullOrWhiteSpace(r.DownloadUrl)
+            || !string.IsNullOrWhiteSpace(r.ApiDownloadUrl)))
         {
             return true;
         }
 
         if (package.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url)))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(package.ApiDownloadUrl))
         {
             return true;
         }
@@ -203,6 +209,9 @@ internal sealed class UpdatePackage
     [JsonPropertyName("downloadRoutes")]
     public List<DownloadRoute> DownloadRoutes { get; set; } = [];
 
+    [JsonPropertyName("apiDownloadUrl")]
+    public string ApiDownloadUrl { get; set; } = string.Empty;
+
     [JsonPropertyName("description")]
     public string Description { get; set; } = string.Empty;
 }
@@ -217,6 +226,9 @@ internal sealed class DownloadRoute
 
     [JsonPropertyName("downloadUrls")]
     public List<string> DownloadUrls { get; set; } = [];
+
+    [JsonPropertyName("apiDownloadUrl")]
+    public string ApiDownloadUrl { get; set; } = string.Empty;
 }
 
 internal sealed class LauncherState
