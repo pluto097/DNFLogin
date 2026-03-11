@@ -6,6 +6,8 @@
 
 - 首次运行自动检测基础资源（如 `Script.pvf`），缺失时下载完整资源包
 - 启动时从云端拉取 `update-manifest.json`，自动执行增量版本更新
+- 支持 PVF 专用更新通道，独立于常规增量更新，单独管理 PVF 文件版本
+- 支持云端推送配置更新地址（`configUpdateUrl`），实现清单地址的无感迁移
 - 内置 `aria2c` 下载引擎：支持断点续传、多线程并发下载（普通线路 16 线程，API 线路 8 线程）
 - 内置 `7za` 解压引擎：无需额外安装任何解压工具
 - 支持多下载线路（`downloadRoutes`），线路故障或速度异常时自动切换备用线路
@@ -30,7 +32,7 @@ DNFLogin/
 ├── MainWindow.xaml               # 主窗口 UI 布局（进度条、状态文本、线路信息）
 ├── MainWindow.xaml.cs            # 核心更新逻辑（下载、解压、线路切换、进度跟踪）
 ├── DNFLogin/
-│   └── LauncherConfig.cs         # 配置模型、清单解析、版本比较
+│   └── LauncherConfig.cs         # 配置模型、清单解析、版本比较、配置同步
 ├── Assets/
 │   ├── DNF.ico                   # 应用图标
 │   └── default-bg-img.png        # 默认背景图片
@@ -45,14 +47,30 @@ DNFLogin/
 
 ```
 初始化 → 释放内嵌工具 → 读取本地配置 → 拉取云端清单
+  → 检查 configUpdateUrl 是否需要同步
+    → 云端 configUpdateUrl 与本地不同：回写本地配置并使用新 URL 重新拉取清单
+    → 相同或未定义：跳过
   → 检查基础资源文件是否存在
     → 不存在：下载并解压完整资源包（fullPackage）
     → 存在：跳过
-  → 解析待应用的增量更新（版本号 > 当前版本）
+  → PVF 更新通道：检查是否有待应用的 PVF 更新
+    → 按版本号从低到高依次下载并解压 PVF 更新包
+    → 每个 PVF 包完成后立即写回 pvfVersion
+  → 常规增量更新：解析待应用的增量更新（版本号 > 当前版本）
     → 按版本号从低到高依次下载并解压增量包
     → 每个增量包完成后立即写回 currentVersion
   → 全部完成后自动启动游戏 EXE
 ```
+
+### 进度分配
+
+总体进度条按以下比例划分：
+
+| 阶段 | 占比 |
+|---|---|
+| 基础资源包检查/下载 | 30% |
+| PVF 更新 | 20% |
+| 常规增量更新 | 50% |
 
 ### 多线路下载与自动切换
 
@@ -84,7 +102,8 @@ DNFLogin/
   "gameExePath": "DNF.exe",
   "baseResourceCheckFile": "Script.pvf",
   "updateManifestUrl": "https://example.com/update-manifest.json",
-  "currentVersion": "0.0.0"
+  "currentVersion": "0.0.0",
+  "pvfVersion": "0"
 }
 ```
 
@@ -94,6 +113,7 @@ DNFLogin/
 | `baseResourceCheckFile` | 用于判断是否需要下载完整包的本地文件，该文件不存在时触发完整包下载 |
 | `updateManifestUrl` | 云端 `update-manifest.json` 的 HTTP(S) 直链地址 |
 | `currentVersion` | 当前本地版本号，程序更新成功后会自动写回。**请勿手动修改**，除非需要强制重新更新 |
+| `pvfVersion` | 当前 PVF 资源版本号，程序更新 PVF 后自动写回。**请勿手动修改** |
 
 > 程序还会自动迁移旧版 `launcher-state.json` 中的 `currentVersion` 字段到 `launcher-config.json`，迁移后删除旧文件。
 
@@ -103,6 +123,7 @@ DNFLogin/
 
 ```json
 {
+  "configUpdateUrl": "https://new-cdn.example.com/update-manifest.json",
   "fullPackage": {
     "version": "1.0.0",
     "downloadUrl": "https://cdn.example.com/full-1.0.0.7z",
@@ -114,16 +135,25 @@ DNFLogin/
       "downloadUrl": "https://cdn.example.com/patch-1.0.1.7z",
       "description": "1.0.1 补丁说明"
     }
+  ],
+  "pvfUpdates": [
+    {
+      "version": "1",
+      "downloadUrl": "https://cdn.example.com/pvf-1.7z",
+      "description": "PVF 资源更新"
+    }
   ]
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
+| `configUpdateUrl` | （可选）云端推送的新清单地址。若与本地 `updateManifestUrl` 不同，程序会自动更新本地配置并使用新地址重新拉取清单，实现清单地址的无感迁移 |
 | `fullPackage` | 基础资源缺失时下载的完整包 |
 | `incrementalUpdates` | 增量补丁数组，按版本号从小到大排列，程序会自动跳过已安装的版本 |
+| `pvfUpdates` | PVF 专用更新数组，独立于常规增量更新，使用单独的 `pvfVersion` 进行版本管理 |
 
-#### 每个包（`fullPackage` / `incrementalUpdates` 元素）支持的下载地址字段
+#### 每个包（`fullPackage` / `incrementalUpdates` / `pvfUpdates` 元素）支持的下载地址字段
 
 三种格式可混用，优先级从高到低：
 
@@ -164,11 +194,12 @@ DNFLogin/
     "downloadUrl": "https://cdn.example.com/full-1.0.0.7z",
     "description": "首次安装完整包"
   },
-  "incrementalUpdates": []
+  "incrementalUpdates": [],
+  "pvfUpdates": []
 }
 ```
 
-> `incrementalUpdates` 为空数组即可。客户端若已是 `1.0.0`，会判定"已是最新版本"并直接启动游戏。
+> `incrementalUpdates` 和 `pvfUpdates` 为空数组即可。客户端若已是 `1.0.0`，会判定"已是最新版本"并直接启动游戏。
 
 #### 范本 B：完整包 + 多个增量补丁
 
@@ -195,7 +226,8 @@ DNFLogin/
       "downloadUrl": "https://cdn.example.com/patch-1.0.3.7z",
       "description": "1.0.3 平衡性调整"
     }
-  ]
+  ],
+  "pvfUpdates": []
 }
 ```
 
@@ -214,7 +246,8 @@ DNFLogin/
     ],
     "description": "完整包（分卷）"
   },
-  "incrementalUpdates": []
+  "incrementalUpdates": [],
+  "pvfUpdates": []
 }
 ```
 
@@ -244,11 +277,62 @@ DNFLogin/
     ],
     "description": "完整包（多线路分卷）"
   },
-  "incrementalUpdates": []
+  "incrementalUpdates": [],
+  "pvfUpdates": []
 }
 ```
 
 > 程序会先尝试"电信线路"，若失败或速度过慢则自动切换到"联通线路"。
+
+#### 范本 E：使用 configUpdateUrl 迁移清单地址
+
+```json
+{
+  "configUpdateUrl": "https://new-cdn.example.com/update-manifest.json",
+  "fullPackage": {
+    "version": "1.0.0",
+    "downloadUrl": "https://cdn.example.com/full-1.0.0.7z",
+    "description": "首次安装完整包"
+  },
+  "incrementalUpdates": [],
+  "pvfUpdates": []
+}
+```
+
+> 当旧清单地址需要迁移时，在旧地址的清单中设置 `configUpdateUrl` 指向新地址。客户端拉取旧清单后会自动更新本地配置并使用新地址重新拉取清单。
+
+#### 范本 F：独立 PVF 更新
+
+```json
+{
+  "fullPackage": {
+    "version": "1.0.0",
+    "downloadUrl": "https://cdn.example.com/full-1.0.0.7z",
+    "description": "首次安装完整包"
+  },
+  "incrementalUpdates": [
+    {
+      "version": "1.0.1",
+      "downloadUrl": "https://cdn.example.com/patch-1.0.1.7z",
+      "description": "1.0.1 补丁"
+    }
+  ],
+  "pvfUpdates": [
+    {
+      "version": "1",
+      "downloadUrl": "https://cdn.example.com/pvf-v1.7z",
+      "description": "PVF 资源 v1"
+    },
+    {
+      "version": "2",
+      "downloadUrl": "https://cdn.example.com/pvf-v2.7z",
+      "description": "PVF 资源 v2"
+    }
+  ]
+}
+```
+
+> PVF 更新使用独立的版本号体系（`pvfVersion`），与常规增量更新的 `currentVersion` 互不干扰。PVF 更新在基础资源包之后、常规增量更新之前执行。
 
 ## 错误处理机制
 
@@ -265,13 +349,14 @@ DNFLogin/
 | 7z 解压失败 | 显示 7z 退出码和错误输出 |
 | 游戏 EXE 不存在 | 抛出 `FileNotFoundException` 并显示配置的路径 |
 | 用户关闭程序 | 弹出确认对话框，确认后终止 aria2c 进程，保留缓存文件 |
+| PVF 更新失败 | 立即终止整个更新流程，异常向上层传播 |
 
 ## 使用方法
 
 1. 在云端 Web 服务器上部署 `update-manifest.json`，配置完整包和补丁的下载地址
 2. 编辑程序目录下的 `launcher-config.json`，将 `updateManifestUrl` 指向云端清单地址，`gameExePath` 指向游戏启动文件
 3. 启动程序，程序会自动完成以下流程：
-   - 读取本地配置 -> 拉取云端清单 -> 检查基础资源 -> 下载完整包（如需要）-> 逐个应用增量补丁 -> 启动游戏
+   - 读取本地配置 -> 拉取云端清单 -> 同步 configUpdateUrl（如有） -> 检查基础资源 -> 下载完整包（如需要） -> 应用 PVF 更新 -> 逐个应用增量补丁 -> 启动游戏
 
 无需手动安装 `aria2c` 或 `7z`，这两个工具已内嵌在程序中，运行时自动释放到 `.tools` 目录。
 
