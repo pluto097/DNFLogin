@@ -199,10 +199,17 @@ namespace DNFLogin
                 var config = LauncherConfig.LoadOrCreate(_baseDirectory);
                 var manifest = await LauncherConfig.LoadManifestFromRemoteAsync(config).ConfigureAwait(false);
 
-                const double baseSpan = 40d;
-                const double incrementalSpan = 60d;
+                // 检查云端清单中的 configUpdateUrl，若与本地不同则同步并重新拉取清单
+                (config, manifest) = await LauncherConfig.SyncConfigUpdateUrlAsync(_baseDirectory, config, manifest).ConfigureAwait(false);
+
+                const double baseSpan = 30d;
+                const double pvfSpan = 20d;
+                const double incrementalSpan = 50d;
 
                 await EnsureBasePackageAsync(config, manifest, 0, baseSpan).ConfigureAwait(false);
+
+                // PVF 更新通道：在基础资源检查之后、常规增量更新之前执行
+                await ApplyPVFUpdatesAsync(config, manifest, baseSpan, pvfSpan).ConfigureAwait(false);
 
                 var currentVersion = config.CurrentVersion;
                 var updates = LauncherConfig.ResolvePendingUpdates(manifest, currentVersion);
@@ -220,7 +227,7 @@ namespace DNFLogin
                 for (var i = 0; i < updates.Count; i++)
                 {
                     var update = updates[i];
-                    var stageStart = baseSpan + (perUpdateSpan * i);
+                    var stageStart = baseSpan + pvfSpan + (perUpdateSpan * i);
                     await DownloadAndExtractByAria2Async(config, update, $"增量包 {update.Version}", stageStart, perUpdateSpan)
                         .ConfigureAwait(false);
 
@@ -234,7 +241,7 @@ namespace DNFLogin
             }
             catch (Exception ex)
             {
-                ReportProgress("更新失败", ex.Message, null, _globalProgress);
+                ReportProgress("更新失败", $"{ex.Message}\n请联系管理员获取帮助", null, _globalProgress);
             }
         }
 
@@ -260,6 +267,37 @@ namespace DNFLogin
             config.CurrentVersion = manifest.FullPackage.Version;
             LauncherConfig.SaveConfig(_baseDirectory, config);
             ReportStageProgress("基础资源检查", "完整资源包安装完成", 100, stageStart, stageSpan);
+        }
+
+        /// <summary>
+        /// PVF 专用更新通道：独立管理 PVF 文件的增量更新。
+        /// 更新失败时立即终止整个更新流程，异常向上层传播。
+        /// </summary>
+        private async Task ApplyPVFUpdatesAsync(LauncherConfig config, UpdateManifest manifest, double stageStart, double stageSpan)
+        {
+            var pvfUpdates = LauncherConfig.ResolvePendingPVFUpdates(manifest, config.PVFVersion);
+
+            if (pvfUpdates.Count == 0)
+            {
+                ReportStageProgress("PVF资源检查", $"PVF资源已是最新（当前版本：{config.PVFVersion}）", 100, stageStart, stageSpan);
+                return;
+            }
+
+            var perUpdateSpan = stageSpan / pvfUpdates.Count;
+
+            for (var i = 0; i < pvfUpdates.Count; i++)
+            {
+                var update = pvfUpdates[i];
+                var updateStageStart = stageStart + (perUpdateSpan * i);
+
+                await DownloadAndExtractByAria2Async(config, update, $"PVF更新 {update.Version}", updateStageStart, perUpdateSpan)
+                    .ConfigureAwait(false);
+
+                config.PVFVersion = update.Version;
+                LauncherConfig.SaveConfig(_baseDirectory, config);
+            }
+
+            ReportStageProgress("PVF更新完成", $"PVF资源已更新到版本 {config.PVFVersion}", 100, stageStart, stageSpan);
         }
 
         private async Task DownloadAndExtractByAria2Async(LauncherConfig config, UpdatePackage package, string displayName, double stageStart, double stageSpan)

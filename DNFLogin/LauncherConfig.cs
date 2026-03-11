@@ -24,8 +24,9 @@ internal sealed class LauncherConfig
 
     public required string GameExePath { get; init; }
     public required string BaseResourceCheckFile { get; init; }
-    public required string UpdateManifestUrl { get; init; }
+    public required string UpdateManifestUrl { get; set; }
     public string CurrentVersion { get; set; } = "0.0.0";
+    public string PVFVersion { get; set; } = "0";
 
     public static LauncherConfig LoadOrCreate(string baseDirectory)
     {
@@ -37,7 +38,8 @@ internal sealed class LauncherConfig
                 GameExePath = "DNF.exe",
                 BaseResourceCheckFile = "Script.pvf",
                 UpdateManifestUrl = DefaultUpdateManifestUrl,
-                CurrentVersion = "0.0.0"
+                CurrentVersion = "0.0.0",
+                PVFVersion = "0"
             };
 
             File.WriteAllText(configPath, JsonSerializer.Serialize(defaultConfig, JsonOptions));
@@ -63,7 +65,8 @@ internal sealed class LauncherConfig
             GameExePath = rawConfig.GameExePath ?? string.Empty,
             BaseResourceCheckFile = rawConfig.BaseResourceCheckFile ?? "Script.pvf",
             UpdateManifestUrl = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl) ? DefaultUpdateManifestUrl : rawConfig.UpdateManifestUrl!,
-            CurrentVersion = string.IsNullOrWhiteSpace(migratedCurrentVersion) ? "0.0.0" : migratedCurrentVersion!
+            CurrentVersion = string.IsNullOrWhiteSpace(migratedCurrentVersion) ? "0.0.0" : migratedCurrentVersion!,
+            PVFVersion = string.IsNullOrWhiteSpace(rawConfig.PVFVersion) ? "0" : rawConfig.PVFVersion!
         };
 
         if (string.IsNullOrWhiteSpace(config.GameExePath)
@@ -97,6 +100,7 @@ internal sealed class LauncherConfig
             ?? throw new InvalidOperationException("无法解析 update-manifest.json");
 
         manifest.IncrementalUpdates ??= [];
+        manifest.PvfUpdates ??= [];
         return manifest;
     }
 
@@ -113,6 +117,44 @@ internal sealed class LauncherConfig
                 && CompareVersions(x.Version, currentVersion) > 0)
             .OrderBy(x => x.Version, VersionComparer.Instance)
             .ToList();
+    }
+
+    public static IReadOnlyList<UpdatePackage> ResolvePendingPVFUpdates(UpdateManifest manifest, string currentPVFVersion)
+    {
+        return manifest.PvfUpdates
+            .Where(x => HasAnyDownloadSource(x)
+                && CompareVersions(x.Version, currentPVFVersion) > 0)
+            .OrderBy(x => x.Version, VersionComparer.Instance)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 检查云端清单中的 configUpdateUrl 是否需要同步到本地配置。
+    /// 如果需要更新，则回写本地 launcher-config.json 并使用新 URL 重新拉取云端清单。
+    /// </summary>
+    public static async Task<(LauncherConfig Config, UpdateManifest Manifest)> SyncConfigUpdateUrlAsync(
+        string baseDirectory, LauncherConfig config, UpdateManifest manifest, CancellationToken cancellationToken = default)
+    {
+        var remoteUrl = manifest.ConfigUpdateUrl;
+
+        // configUpdateUrl 为空或未定义，跳过
+        if (string.IsNullOrWhiteSpace(remoteUrl))
+        {
+            return (config, manifest);
+        }
+
+        // configUpdateUrl 与当前本地 URL 相同，跳过
+        if (string.Equals(config.UpdateManifestUrl, remoteUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            return (config, manifest);
+        }
+
+        // URL 不同，更新本地配置并重新拉取清单
+        config.UpdateManifestUrl = remoteUrl;
+        SaveConfig(baseDirectory, config);
+
+        var newManifest = await LoadManifestFromRemoteAsync(config, cancellationToken).ConfigureAwait(false);
+        return (config, newManifest);
     }
 
     private static bool HasAnyDownloadSource(UpdatePackage package)
@@ -161,6 +203,7 @@ internal sealed class LauncherConfig
         public string? BaseResourceCheckFile { get; init; }
         public string? UpdateManifestUrl { get; init; }
         public string? CurrentVersion { get; init; }
+        public string? PVFVersion { get; init; }
     }
 
     private static string LoadLegacyCurrentVersion(string baseDirectory)
@@ -188,11 +231,17 @@ internal sealed class LauncherConfig
 
 internal sealed class UpdateManifest
 {
+    [JsonPropertyName("configUpdateUrl")]
+    public string? ConfigUpdateUrl { get; set; }
+
     [JsonPropertyName("fullPackage")]
     public UpdatePackage? FullPackage { get; set; }
 
     [JsonPropertyName("incrementalUpdates")]
     public List<UpdatePackage> IncrementalUpdates { get; set; } = [];
+
+    [JsonPropertyName("pvfUpdates")]
+    public List<UpdatePackage> PvfUpdates { get; set; } = [];
 }
 
 internal sealed class UpdatePackage
