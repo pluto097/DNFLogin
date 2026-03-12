@@ -1,4 +1,4 @@
-﻿<adu:AduWindow x:Class="DNFLogin.MainWindow"
+<adu:AduWindow x:Class="DNFLogin.MainWindow"
                x:Name="RootWindow"
                xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -55,6 +55,12 @@
                            FontSize="12"
                            TextWrapping="Wrap"
                            Margin="0,4,0,0" />
+                <TextBlock x:Name="VersionText"
+                           Text=""
+                           Foreground="#99FFFFFF"
+                           FontSize="11"
+                           Margin="0,4,0,0"
+                           TextWrapping="Wrap" />
                 <TextBlock x:Name="RouteInfoText"
                            Text=""
                            Foreground="#99FFFFFF"

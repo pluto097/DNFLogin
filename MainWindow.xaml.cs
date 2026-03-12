@@ -1,4 +1,4 @@
-﻿using AduSkin.Controls.Metro;
+using AduSkin.Controls.Metro;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -197,6 +197,7 @@ namespace DNFLogin
                 _sevenZipPath = ExtractEmbeddedTool("7za.exe", toolsDir);
 
                 var config = LauncherConfig.LoadOrCreate(_baseDirectory);
+                UpdateVersionDisplay(config);
                 var manifest = await LauncherConfig.LoadManifestFromRemoteAsync(config).ConfigureAwait(false);
 
                 // 检查云端清单中的 configUpdateUrl，若与本地不同则同步并重新拉取清单
@@ -233,6 +234,7 @@ namespace DNFLogin
 
                     config.CurrentVersion = update.Version;
                     LauncherConfig.SaveConfig(_baseDirectory, config);
+                    UpdateVersionDisplay(config);
                 }
 
                 ReportProgress("所有更新完成", $"当前版本：{config.CurrentVersion}", 100, 100);
@@ -266,6 +268,7 @@ namespace DNFLogin
 
             config.CurrentVersion = manifest.FullPackage.Version;
             LauncherConfig.SaveConfig(_baseDirectory, config);
+            UpdateVersionDisplay(config);
             ReportStageProgress("基础资源检查", "完整资源包安装完成", 100, stageStart, stageSpan);
         }
 
@@ -295,6 +298,7 @@ namespace DNFLogin
 
                 config.PVFVersion = update.Version;
                 LauncherConfig.SaveConfig(_baseDirectory, config);
+                UpdateVersionDisplay(config);
             }
 
             ReportStageProgress("PVF更新完成", $"PVF资源已更新到版本 {config.PVFVersion}", 100, stageStart, stageSpan);
@@ -749,6 +753,15 @@ namespace DNFLogin
 
             _isAutoClosing = true;
             Dispatcher.Invoke(Close);
+        }
+
+        private void UpdateVersionDisplay(LauncherConfig config)
+        {
+            if (Dispatcher.HasShutdownStarted) return;
+            Dispatcher.Invoke(() =>
+            {
+                VersionText.Text = $"CurrentVersion: {config.CurrentVersion}  PVFVersion: {config.PVFVersion}";
+            });
         }
 
         private void ReportProgress(string title, string detail, double? stepPercent = null, double? globalPercent = null)
