@@ -10,10 +10,13 @@ using System.Threading.Tasks;
 
 namespace DNFLogin;
 
-internal sealed class LauncherConfig
+    /// <summary>
+    /// 启动器配置模型，负责管理本地配置文件（launcher-config.json）的加载与保存，
+    /// 以及提供从云端拉取更新清单、解析待更新版本等核心业务逻辑。
+    /// </summary>
+    internal sealed class LauncherConfig
 {
     private const string ConfigFileName = "launcher-config.json";
-    private const string StateFileName = "launcher-state.json";
     private const string DefaultUpdateManifestUrl = "https://example.com/update-manifest.json";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -28,6 +31,10 @@ internal sealed class LauncherConfig
     public string CurrentVersion { get; set; } = "0.0.0";
     public string PVFVersion { get; set; } = "0";
 
+    /// <summary>
+    /// 加载本地配置文件。如果文件不存在则创建一个包含默认配置的初始文件。
+    /// 还会负责初始化和补全缺失的关键信息。
+    /// </summary>
     public static LauncherConfig LoadOrCreate(string baseDirectory)
     {
         var configPath = Path.Combine(baseDirectory, ConfigFileName);
@@ -53,19 +60,12 @@ internal sealed class LauncherConfig
         var shouldSaveMigratedConfig = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl)
             || string.IsNullOrWhiteSpace(rawConfig.CurrentVersion);
 
-        var migratedCurrentVersion = rawConfig.CurrentVersion;
-        if (string.IsNullOrWhiteSpace(migratedCurrentVersion))
-        {
-            migratedCurrentVersion = LoadLegacyCurrentVersion(baseDirectory);
-            shouldSaveMigratedConfig = true;
-        }
-
         var config = new LauncherConfig
         {
             GameExePath = rawConfig.GameExePath ?? string.Empty,
             BaseResourceCheckFile = rawConfig.BaseResourceCheckFile ?? "Script.pvf",
             UpdateManifestUrl = string.IsNullOrWhiteSpace(rawConfig.UpdateManifestUrl) ? DefaultUpdateManifestUrl : rawConfig.UpdateManifestUrl!,
-            CurrentVersion = string.IsNullOrWhiteSpace(migratedCurrentVersion) ? "0.0.0" : migratedCurrentVersion!,
+            CurrentVersion = string.IsNullOrWhiteSpace(rawConfig.CurrentVersion) ? "0.0.0" : rawConfig.CurrentVersion!,
             PVFVersion = string.IsNullOrWhiteSpace(rawConfig.PVFVersion) ? "0" : rawConfig.PVFVersion!
         };
 
@@ -78,12 +78,14 @@ internal sealed class LauncherConfig
         if (shouldSaveMigratedConfig)
         {
             File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
-            TryDeleteLegacyStateFile(baseDirectory);
         }
 
         return config;
     }
 
+    /// <summary>
+    /// 使用配置中的 UpdateManifestUrl 异步向云端拉取最新更新清单（update-manifest.json）。
+    /// </summary>
     public static async Task<UpdateManifest> LoadManifestFromRemoteAsync(LauncherConfig config, CancellationToken cancellationToken = default)
     {
         if (!Uri.TryCreate(config.UpdateManifestUrl, UriKind.Absolute, out var manifestUri))
@@ -110,6 +112,9 @@ internal sealed class LauncherConfig
         File.WriteAllText(configPath, JsonSerializer.Serialize(config, JsonOptions));
     }
 
+    /// <summary>
+    /// 解析所有待应用的常规增量更新（版本号大于当前版本且包含有效下载地址的更新包）。
+    /// </summary>
     public static IReadOnlyList<UpdatePackage> ResolvePendingUpdates(UpdateManifest manifest, string currentVersion)
     {
         return manifest.IncrementalUpdates
@@ -119,6 +124,9 @@ internal sealed class LauncherConfig
             .ToList();
     }
 
+    /// <summary>
+    /// 解析所有待应用的 PVF 增量更新（版本号大于当前 PVF 版本且包含有效下载地址的更新包）。
+    /// </summary>
     public static IReadOnlyList<UpdatePackage> ResolvePendingPVFUpdates(UpdateManifest manifest, string currentPVFVersion)
     {
         return manifest.PvfUpdates
@@ -161,18 +169,12 @@ internal sealed class LauncherConfig
     {
         if (package.DownloadRoutes.Any(r =>
             r.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url))
-            || !string.IsNullOrWhiteSpace(r.DownloadUrl)
-            || !string.IsNullOrWhiteSpace(r.ApiDownloadUrl)))
+            || !string.IsNullOrWhiteSpace(r.DownloadUrl)))
         {
             return true;
         }
 
         if (package.DownloadUrls.Any(url => !string.IsNullOrWhiteSpace(url)))
-        {
-            return true;
-        }
-
-        if (!string.IsNullOrWhiteSpace(package.ApiDownloadUrl))
         {
             return true;
         }
@@ -205,32 +207,13 @@ internal sealed class LauncherConfig
         public string? CurrentVersion { get; init; }
         public string? PVFVersion { get; init; }
     }
-
-    private static string LoadLegacyCurrentVersion(string baseDirectory)
-    {
-        var path = Path.Combine(baseDirectory, StateFileName);
-        if (!File.Exists(path))
-        {
-            return "0.0.0";
-        }
-
-        var content = File.ReadAllText(path);
-        var state = JsonSerializer.Deserialize<LauncherState>(content, JsonOptions);
-        return string.IsNullOrWhiteSpace(state?.CurrentVersion) ? "0.0.0" : state.CurrentVersion;
-    }
-
-    private static void TryDeleteLegacyStateFile(string baseDirectory)
-    {
-        var path = Path.Combine(baseDirectory, StateFileName);
-        if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-    }
 }
 
 internal sealed class UpdateManifest
 {
+    [JsonPropertyName("slowSpeedConfig")]
+    public SlowSpeedConfig? SlowSpeedConfig { get; set; }
+
     [JsonPropertyName("configUpdateUrl")]
     public string? ConfigUpdateUrl { get; set; }
 
@@ -242,6 +225,19 @@ internal sealed class UpdateManifest
 
     [JsonPropertyName("pvfUpdates")]
     public List<UpdatePackage> PvfUpdates { get; set; } = [];
+}
+
+/// <summary>
+/// 下载速度异常判定阈值配置（从云端 update-manifest.json 读取）。
+/// 当下载速度≤thresholdMiBps 且持续≥durationSeconds 秒时，自动切换线路。
+/// </summary>
+internal sealed class SlowSpeedConfig
+{
+    [JsonPropertyName("thresholdMiBps")]
+    public double? ThresholdMiBps { get; set; }
+
+    [JsonPropertyName("durationSeconds")]
+    public int? DurationSeconds { get; set; }
 }
 
 internal sealed class UpdatePackage
@@ -258,11 +254,11 @@ internal sealed class UpdatePackage
     [JsonPropertyName("downloadRoutes")]
     public List<DownloadRoute> DownloadRoutes { get; set; } = [];
 
-    [JsonPropertyName("apiDownloadUrl")]
-    public string ApiDownloadUrl { get; set; } = string.Empty;
-
     [JsonPropertyName("description")]
     public string Description { get; set; } = string.Empty;
+
+    [JsonPropertyName("downloadArgs")]
+    public string DownloadArgs { get; set; } = string.Empty;
 }
 
 internal sealed class DownloadRoute
@@ -276,12 +272,6 @@ internal sealed class DownloadRoute
     [JsonPropertyName("downloadUrls")]
     public List<string> DownloadUrls { get; set; } = [];
 
-    [JsonPropertyName("apiDownloadUrl")]
-    public string ApiDownloadUrl { get; set; } = string.Empty;
-}
-
-internal sealed class LauncherState
-{
-    [JsonPropertyName("currentVersion")]
-    public string CurrentVersion { get; set; } = "0.0.0";
+    [JsonPropertyName("downloadArgs")]
+    public string DownloadArgs { get; set; } = string.Empty;
 }

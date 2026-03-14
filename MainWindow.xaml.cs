@@ -33,9 +33,9 @@ namespace DNFLogin
         private string _aria2Path = null!;
         private string _sevenZipPath = null!;
 
-        // 【下载速度异常判定阈值】当下载速度≤2MB/s且持续时间≥30秒时，判定为当前线路异常，自动切换到下一条线路
-        private const double SlowSpeedThresholdMiBps = 2.0; // 速度阈值：2MiB/s（约2MB/s）
-        private const int SlowSpeedDurationSeconds = 30;     // 持续时间阈值：30秒
+        // 【下载速度异常判定阈值】从云端 slowSpeedConfig 读取，未配置时使用默认值
+        private double _slowSpeedThresholdMiBps = 2.0; // 默认速度阈值：2MiB/s
+        private int _slowSpeedDurationSeconds = 30;     // 默认持续时间阈值：30秒
 
         public MainWindow()
         {
@@ -179,6 +179,11 @@ namespace DNFLogin
             brush.ImageSource = bitmap;
         }
 
+        /// <summary>
+        /// 核心更新流程控制。负责初始化工具、读取配置、检查云端更新清单、
+        /// 确保基础资源完整性，以及依次应用 PVF 和常规增量更新包。
+        /// 若所有更新已完成或已是最新，则最终启动游戏。
+        /// </summary>
         private async Task RunUpdateFlowAsync()
         {
             if (_updateStarted)
@@ -202,6 +207,15 @@ namespace DNFLogin
 
                 // 检查云端清单中的 configUpdateUrl，若与本地不同则同步并重新拉取清单
                 (config, manifest) = await LauncherConfig.SyncConfigUpdateUrlAsync(_baseDirectory, config, manifest).ConfigureAwait(false);
+
+                // 从云端清单读取下载速度异常判定阈值，未配置则保持默认值
+                if (manifest.SlowSpeedConfig is { } speedCfg)
+                {
+                    if (speedCfg.ThresholdMiBps.HasValue)
+                        _slowSpeedThresholdMiBps = speedCfg.ThresholdMiBps.Value;
+                    if (speedCfg.DurationSeconds.HasValue)
+                        _slowSpeedDurationSeconds = speedCfg.DurationSeconds.Value;
+                }
 
                 const double baseSpan = 30d;
                 const double pvfSpan = 20d;
@@ -247,6 +261,9 @@ namespace DNFLogin
             }
         }
 
+        /// <summary>
+        /// 检查本地基础资源（如 Script.pvf）是否存在，若不存在则调用下载逻辑获取并解压完整资源包。
+        /// </summary>
         private async Task EnsureBasePackageAsync(LauncherConfig config, UpdateManifest manifest, double stageStart, double stageSpan)
         {
             var checkFile = Path.Combine(_baseDirectory, config.BaseResourceCheckFile);
@@ -304,6 +321,10 @@ namespace DNFLogin
             ReportStageProgress("PVF更新完成", $"PVF资源已更新到版本 {config.PVFVersion}", 100, stageStart, stageSpan);
         }
 
+        /// <summary>
+        /// 下载并解压缩指定的更新包。支持多线路重试与错误时的自动线路切换逻辑。
+        /// 下载和解压成功后会返回；若所有线路均失败，则触发异常中止更新。
+        /// </summary>
         private async Task DownloadAndExtractByAria2Async(LauncherConfig config, UpdatePackage package, string displayName, double stageStart, double stageSpan)
         {
             var routes = ResolveDownloadRoutes(package);
@@ -326,7 +347,7 @@ namespace DNFLogin
                     var isLastRoute = routeIdx >= routes.Count - 1;
 
                     ReportStageProgress($"准备下载{displayName}", $"{routeLabel}{package.Description}", 0, stageStart, stageSpan);
-                    await RunAria2DownloadAsync(_aria2Path, downloadUrls, tempArchive, route.IsApiRoute, isLastRoute, (percent, detail) =>
+                    await RunAria2DownloadAsync(_aria2Path, downloadUrls, tempArchive, route.DownloadArgs, isLastRoute, (percent, detail) =>
                     {
                         var normalized = Math.Clamp(percent * 0.85, 0, 85);
                         var text = string.IsNullOrWhiteSpace(package.Description)
@@ -439,7 +460,7 @@ namespace DNFLogin
             }
         }
 
-        private sealed record ResolvedRoute(string Name, IReadOnlyList<string> Urls, int RouteIndex, int TotalRoutes, bool IsApiRoute);
+        private sealed record ResolvedRoute(string Name, IReadOnlyList<string> Urls, string DownloadArgs, int RouteIndex, int TotalRoutes);
 
         private static IReadOnlyList<ResolvedRoute> ResolveDownloadRoutes(UpdatePackage package)
         {
@@ -450,26 +471,27 @@ namespace DNFLogin
             {
                 foreach (var route in package.DownloadRoutes)
                 {
-                    var (urls, isApiRoute) = GetUrlsFromRoute(route);
+                    var urls = GetUrlsFromRoute(route);
                     if (urls.Count > 0)
                     {
+                        var args = string.IsNullOrWhiteSpace(route.DownloadArgs) ? package.DownloadArgs : route.DownloadArgs;
                         routes.Add(new ResolvedRoute(
                             string.IsNullOrWhiteSpace(route.Name) ? $"线路{routes.Count + 1}" : route.Name,
                             urls,
+                            args,
                             routes.Count + 1,
-                            0, // TotalRoutes 稍后回填
-                            isApiRoute));
+                            0)); // TotalRoutes 稍后回填
                     }
                 }
             }
 
-            // 兼容旧格式：将顶层 downloadUrls / downloadUrl / apiDownloadUrl 作为备用线路
+            // 兼容旧格式：将顶层 downloadUrls / downloadUrl 作为备用线路
             if (routes.Count == 0)
             {
-                var (legacyUrls, isApiRoute) = GetLegacyUrls(package);
+                var legacyUrls = GetLegacyUrls(package);
                 if (legacyUrls.Count > 0)
                 {
-                    routes.Add(new ResolvedRoute("默认线路", legacyUrls, 1, 1, isApiRoute));
+                    routes.Add(new ResolvedRoute("默认线路", legacyUrls, package.DownloadArgs, 1, 1));
                     return routes;
                 }
             }
@@ -489,59 +511,53 @@ namespace DNFLogin
             return routes;
         }
 
-        private static (IReadOnlyList<string> Urls, bool IsApiRoute) GetUrlsFromRoute(DownloadRoute route)
+        private static IReadOnlyList<string> GetUrlsFromRoute(DownloadRoute route)
         {
             if (route.DownloadUrls.Count > 0)
             {
                 var urls = route.DownloadUrls.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
                 if (urls.Count > 0)
                 {
-                    return (urls, false);
+                    return urls;
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(route.DownloadUrl))
             {
-                return ([route.DownloadUrl], false);
+                return [route.DownloadUrl];
             }
 
-            if (!string.IsNullOrWhiteSpace(route.ApiDownloadUrl))
-            {
-                return ([route.ApiDownloadUrl], true);
-            }
-
-            return ([], false);
+            return [];
         }
 
-        private static (IReadOnlyList<string> Urls, bool IsApiRoute) GetLegacyUrls(UpdatePackage package)
+        private static IReadOnlyList<string> GetLegacyUrls(UpdatePackage package)
         {
             if (package.DownloadUrls.Count > 0)
             {
                 var urls = package.DownloadUrls.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
                 if (urls.Count > 0)
                 {
-                    return (urls, false);
+                    return urls;
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(package.DownloadUrl))
             {
-                return ([package.DownloadUrl], false);
+                return [package.DownloadUrl];
             }
 
-            if (!string.IsNullOrWhiteSpace(package.ApiDownloadUrl))
-            {
-                return ([package.ApiDownloadUrl], true);
-            }
-
-            return ([], false);
+            return [];
         }
 
-        private async Task RunAria2DownloadAsync(string aria2Path, IReadOnlyList<string> urls, string outputFile, bool isApiRoute, bool isLastRoute, Action<double, string> onProgress)
+        /// <summary>
+        /// 调用内嵌的 aria2c.exe 进行多线程/多段下载。
+        /// 如果提供的是分卷 URL 列表，会依次按顺序将分卷下载至缓存目录。
+        /// </summary>
+        private async Task RunAria2DownloadAsync(string aria2Path, IReadOnlyList<string> urls, string outputFile, string downloadArgs, bool isLastRoute, Action<double, string> onProgress)
         {
             if (urls.Count == 1)
             {
-                await DownloadSingleFileByAria2Async(aria2Path, urls[0], outputFile, isApiRoute, isLastRoute, onProgress).ConfigureAwait(false);
+                await DownloadSingleFileByAria2Async(aria2Path, urls[0], outputFile, downloadArgs, isLastRoute, onProgress).ConfigureAwait(false);
                 return;
             }
 
@@ -556,7 +572,7 @@ namespace DNFLogin
             {
                 var partFile = i == 0 ? outputFile : Path.Combine(cacheDirectory, $"{filePrefix}.{i + 1:D3}");
                 var partTitle = $"分卷 {i + 1}/{urls.Count}";
-                await DownloadSingleFileByAria2Async(aria2Path, urls[i], partFile, isApiRoute, isLastRoute, (partPercent, detail) =>
+                await DownloadSingleFileByAria2Async(aria2Path, urls[i], partFile, downloadArgs, isLastRoute, (partPercent, detail) =>
                 {
                     var totalPercent = ((i + (partPercent / 100d)) / urls.Count) * 100d;
                     var detailWithPart = $"{partTitle} | {detail}";
@@ -567,7 +583,7 @@ namespace DNFLogin
             onProgress(100, "下载完成");
         }
 
-        private async Task DownloadSingleFileByAria2Async(string aria2Path, string url, string outputFile, bool isApiRoute, bool isLastRoute, Action<double, string> onProgress)
+        private async Task DownloadSingleFileByAria2Async(string aria2Path, string url, string outputFile, string downloadArgs, bool isLastRoute, Action<double, string> onProgress)
         {
             if (File.Exists(outputFile) && !File.Exists(outputFile + ".aria2"))
             {
@@ -575,12 +591,17 @@ namespace DNFLogin
                 return;
             }
 
-            var concurrency = isApiRoute ? "8" : "16";
-            var baseArgs = $"--continue=true --auto-file-renaming=false --auto-save-interval=3 --summary-interval=1 --console-log-level=notice -x {concurrency} -s {concurrency} --file-allocation=none --min-split-size=4M -k4M";
+            var fixedArgs = "--continue=true --auto-file-renaming=false --auto-save-interval=2 --summary-interval=1 --console-log-level=notice --file-allocation=none";
+            var baseArgs = fixedArgs;
 
-            if (isApiRoute)
+            if (string.IsNullOrWhiteSpace(downloadArgs))
             {
-                baseArgs += " --header=\"User-Agent: pan.baidu.com\" --header=\"Referer: https://pan.baidu.com/\"";
+                var concurrency = "16";
+                baseArgs += $" -x {concurrency} -s {concurrency} --min-split-size=4M -k4M";
+            }
+            else
+            {
+                baseArgs += $" {downloadArgs}";
             }
 
             baseArgs += $" --dir=\"{Path.GetDirectoryName(outputFile)}\" --out=\"{Path.GetFileName(outputFile)}\" \"{url}\"";
@@ -633,16 +654,16 @@ namespace DNFLogin
                             var speedMiBps = ConvertSpeedToMiBps(speedValue, speedMatch.Groups[2].Value);
 
                             // 【异常速度判定】速度≤2MB/s时开始计时，速度恢复则重置计时
-                            if (speedMiBps <= SlowSpeedThresholdMiBps)
+                            if (speedMiBps <= _slowSpeedThresholdMiBps)
                             {
                                 slowSpeedStartTime ??= DateTime.UtcNow;
                                 var elapsed = (DateTime.UtcNow - slowSpeedStartTime.Value).TotalSeconds;
-                                if (elapsed >= SlowSpeedDurationSeconds)
+                                if (elapsed >= _slowSpeedDurationSeconds)
                                 {
                                     // 【自动线路切换】速度持续过慢，终止当前aria2进程并切换到下一条线路
                                     try { process.Kill(); } catch { }
                                     throw new SlowSpeedSwitchException(
-                                        $"下载速度≤{SlowSpeedThresholdMiBps}MB/s 已持续 {elapsed:F0} 秒");
+                                        $"下载速度≤{_slowSpeedThresholdMiBps}MB/s 已持续 {elapsed:F0} 秒");
                                 }
                             }
                             else
@@ -703,6 +724,10 @@ namespace DNFLogin
             }
         }
 
+        /// <summary>
+        /// 调用内嵌的 7za.exe 对下载好的压缩包（支持分卷）进行自动解压，并将文件释放至指定的基目录。
+        /// 遇到错误时抛出异常以便上层进行线路切换或报错记录。
+        /// </summary>
         private async Task ExtractBySevenZipAsync(string sevenZipPath, string archivePath, string displayName, string downloadUrl)
         {
             var startInfo = new ProcessStartInfo
