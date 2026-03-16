@@ -233,7 +233,7 @@ namespace DNFLogin
                 {
                     ReportProgress("已是最新版本", $"当前版本：{currentVersion}", 100, 100);
                     await Task.Delay(400).ConfigureAwait(false);
-                    LaunchGame(config);
+                    await LaunchGameAsync(config);
                     return;
                 }
 
@@ -253,7 +253,7 @@ namespace DNFLogin
 
                 ReportProgress("所有更新完成", $"当前版本：{config.CurrentVersion}", 100, 100);
                 await Task.Delay(600).ConfigureAwait(false);
-                LaunchGame(config);
+                await LaunchGameAsync(config);
             }
             catch (Exception ex)
             {
@@ -758,7 +758,7 @@ namespace DNFLogin
             }
         }
 
-        private void LaunchGame(LauncherConfig config)
+        private async Task LaunchGameAsync(LauncherConfig config)
         {
             var exePath = Path.IsPathRooted(config.GameExePath)
                 ? config.GameExePath
@@ -769,12 +769,41 @@ namespace DNFLogin
                 throw new FileNotFoundException($"未找到配置的游戏启动文件: {exePath}");
             }
 
-            Process.Start(new ProcessStartInfo
+            ReportProgress("正在启动游戏，请稍后。", $"正在启动: {Path.GetFileName(exePath)}", 100, 100);
+
+            var process = Process.Start(new ProcessStartInfo
             {
                 FileName = exePath,
                 WorkingDirectory = Path.GetDirectoryName(exePath) ?? _baseDirectory,
                 UseShellExecute = true
             });
+
+            if (process is not null)
+            {
+                // 等待游戏进程启动完成（获取到主窗口句柄），最多等待 60 秒
+                const int maxWaitMs = 60_000;
+                const int pollIntervalMs = 500;
+                var elapsed = 0;
+
+                while (elapsed < maxWaitMs)
+                {
+                    await Task.Delay(pollIntervalMs).ConfigureAwait(false);
+                    elapsed += pollIntervalMs;
+
+                    try
+                    {
+                        process.Refresh();
+                        if (process.HasExited || process.MainWindowHandle != IntPtr.Zero)
+                        {
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                }
+            }
 
             _isAutoClosing = true;
             Dispatcher.Invoke(Close);
